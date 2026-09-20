@@ -1,5 +1,7 @@
 # LaTeX math — `$...$` to native equations for ONLYOFFICE
 
+`https://github.com/ZhangDM-520/onlyoffice-latex-math`
+
 An ONLYOFFICE **Document Editor** plugin that finds LaTeX source delimited by `$…$`, `$$…$$`,
 `\(…\)` and `\[…\]` in the document body and replaces each span with a **native math object**
 (OMML `m:oMath`), so it renders as an equation and stays editable with the equation toolbar.
