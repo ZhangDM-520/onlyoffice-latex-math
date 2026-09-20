@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<title>LaTeX math report</title>
+	<link rel="stylesheet" href="../v1/plugins.css" />
+	<style>
+		html, body {
+			margin: 0;
+			padding: 0;
+			height: 100%;
+			font-family: "Segoe UI", -apple-system, "Noto Sans", sans-serif;
+			font-size: 12px;
+			background: var(--background-normal, #ffffff);
+			color: var(--text-normal, #333333);
+		}
+		#report {
+			box-sizing: border-box;
+			padding: 12px 14px;
+			height: 100%;
+			overflow: auto;
+		}
+		#title {
+			font-weight: 600;
+			font-size: 13px;
+			margin-bottom: 2px;
+		}
+		#when {
+			opacity: 0.6;
+			margin-bottom: 8px;
+		}
+		pre {
+			white-space: pre-wrap;
+			word-break: break-word;
+			margin: 0;
+			font-family: "Cascadia Mono", Consolas, monospace;
+			font-size: 11.5px;
+			line-height: 1.5;
+		}
+		#actions {
+			margin-top: 10px;
+		}
+		button {
+			font: inherit;
+			padding: 4px 10px;
+			cursor: pointer;
+		}
+	</style>
+</head>
+<body>
+	<div id="report">
+		<div id="title"></div>
+		<div id="when"></div>
+		<pre id="lines"></pre>
+		<div id="actions">
+			<button id="copy">Copy</button>
+		</div>
+	</div>
+	<script type="text/javascript" src="scripts/report.js"></script>
+</body>
+</html>

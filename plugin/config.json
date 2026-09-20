@@ -1,0 +1,44 @@
+{
+	"name": "LaTeX math",
+	"nameLocale": {
+		"zh": "LaTeX 公式",
+		"ru": "LaTeX формулы",
+		"fr": "Maths LaTeX",
+		"de": "LaTeX-Formeln",
+		"es": "Matemáticas LaTeX"
+	},
+	"guid": "asc.{5B4C1A72-3D0E-4F58-91A6-2C7E48D0B913}",
+	"version": "0.1.0",
+	"minVersion": "8.2.0",
+	"variations": [
+		{
+			"description": "Convert $...$, $$...$$, \\(...\\) and \\[...\\] LaTeX source text into native math equations.",
+			"descriptionLocale": {
+				"zh": "把 $...$、$$...$$、\\(...\\)、\\[...\\] 的 LaTeX 源码转换成原生公式对象。",
+				"ru": "Преобразуйте текст LaTeX $...$, $$...$$, \\(...\\), \\[...\\] в собственные формулы.",
+				"fr": "Convertissez le texte LaTeX $...$, $$...$$, \\(...\\), \\[...\\] en équations natives.",
+				"de": "Wandeln Sie LaTeX-Quelltext $...$, $$...$$, \\(...\\), \\[...\\] in native Formeln um.",
+				"es": "Convierta el texto LaTeX $...$, $$...$$, \\(...\\), \\[...\\] en ecuaciones nativas."
+			},
+			"url": "index.html",
+			"icons": "resources/%theme-type%(light|dark)/icon%scale%(default).png",
+			"isViewer": false,
+			"EditorsSupport": ["word"],
+			"type": "background",
+			"initDataType": "none",
+			"buttons": [],
+			"events": ["onToolbarMenuClick", "onContextMenuShow", "onContextMenuClick"],
+			"store": {
+				"background": {
+					"light": "#5B4C1A",
+					"dark": "#5B4C1A"
+				},
+				"icons": {
+					"light": "resources/store/icons",
+					"dark": "resources/store/icons"
+				},
+				"categories": ["work", "specAbilities"]
+			}
+		}
+	]
+}
