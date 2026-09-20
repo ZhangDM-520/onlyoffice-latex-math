@@ -53,7 +53,41 @@ Verify that the loaded script is the installed one (see `docs/NOTE.md` for the C
   *Convert selection as display math* / delimiter toggles / *Show last report*.
 * **Right-click** in the body → **LaTeX math** (runs the whole-document conversion) or its submenu
   entries *Convert selection* / *Convert whole document*.
+* **`Alt+L`** converts the selected text. For the whole document, select everything first
+  (`Ctrl+A`) and press the chord — there is no separate whole-document shortcut.
 * A conversion is one undo step: a single `Ctrl+Z` restores every source span verbatim.
+
+### Hotkeys
+
+| Chord | Action |
+| :--- | :--- |
+| `Alt+L` | *Convert selection* — the same code path as the menu entry |
+
+The chord only exists in the Writer (`variants[0].EditorsSupport` is `["word"]`). Two things about how
+it is implemented are worth knowing, because both are visible in the editor:
+
+* **The host does not deliver chords to plugins.** The word editor calls
+  `g_asc_plugins.onPluginEvent2("onKeyDown", …)` only from the `isInputHelpersPresent` branch of its key
+  handler — while a form/content-control input helper owns the keyboard — and only for navigation keys.
+  There is no `shortcut` field in the plugin API either. The plugin therefore installs a capture-phase
+  `keydown` listener on the **editor's own document**, which it can reach because its frame is a child of
+  the editor's main frame (`parent.document`).
+* **A chord can arrive with its modifiers stripped.** Measured with injected keystrokes (real X11
+  events into the focused window): `Alt` and `L` arrive as two events — `Alt` (`altKey: true`) and then
+  `l` (`keyCode 76`, every modifier flag `false`) — and the editor would type that `l` into the
+  document. So the chord is recognised from the modifier keydown that precedes it *and* from the key's
+  own flags (a physical chord may well report `altKey: true`), the modifier set must match **exactly**
+  (`Ctrl+L`, `Shift+Alt+L` and a plain `l` are all the editor's), and the claimed key is swallowed
+  before the editor sees it. See `docs/NOTE.md` for the full event dumps.
+
+Two consequences you may notice in use:
+
+* **`Alt+L` on a collapsed caret does nothing visible.** It reports *Select the text to convert first.*
+  and touches nothing — but reports are silent by default, so flip *Report window* on in the plugin menu
+  if you want to see that.
+* **If the listener cannot attach, the chord simply stops working.** A host that keeps plugins on an
+  opaque origin (the shipped AI plugin loads from `onlyoffice://plugin`) cannot be reached; the plugin
+  then logs `no document reached; the hotkeys are unavailable` and everything else keeps working.
 
 ### Delimiters
 
@@ -134,7 +168,7 @@ goes missing.
 ## Tests
 
 ```bash
-node --test tests/          # 85 tests: scanner, icons, harness, integration, report
+node --test tests/          # 99 tests: scanner, icons, hotkeys, harness, integration, report
 ```
 
 `plugin/scripts/scan.js` is the pure core (delimiter rules, offset planning) and is deliberately free
@@ -143,9 +177,10 @@ that talks to the host and runs the editor commands through `Asc.plugin.callComm
 
 ## Known limitations
 
-* **Hotkey** — `Ctrl+Alt+M` (whole document) is implemented, but this build only forwards `onKeyDown`
-  to plugins while a form/content-control input helper owns the keyboard, so the shortcut is
-  effectively inactive. Use the menu. See `docs/NOTE.md`.
+* **Hotkeys** — `Alt+L` works, but only because the plugin listens to the editor's document directly;
+  the host's own plugin key event is not a shortcut channel in this build (9.4.0.130-1). A former
+  `Ctrl+Alt+M` handler relied on that dead event and could never fire, so it was removed rather than
+  kept as advertisement. See *Hotkeys* above and `docs/NOTE.md`.
 * `LaTeXParser.js` in sdkjs implements a subset of TeX, and it is **lenient**: an expression it does
   not understand is not rejected, its parts are inserted as literal characters. The delimiter rules
   are therefore the only thing standing between prose and a mangled equation — see *How detection

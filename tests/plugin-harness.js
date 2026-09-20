@@ -257,6 +257,105 @@ function createHarness(editor, options) {
 		windowStub.editor = editor.editorApi;
 	}
 
+	// The plugin's background frame is a child frame in the editor window, so it can
+	// reach the editor's own document through `parent.document` - measured live
+	// against 9.4.0.130-1 (plan section 2.2). The chain is modelled here so the
+	// ancestor walk and the capture-phase listener registration are testable, and so
+	// a host that blocks the access can be reproduced with `parentAccessThrows`.
+	var parentDocuments = [];
+	function createDocumentStub(label) {
+		var stub = {
+			label: label,
+			listeners: { keydown: [], keyup: [] },
+			addEventListener: function (type, handler, capture) {
+				if (stub.listeners[type]) {
+					stub.listeners[type].push({ handler: handler, capture: !!capture });
+				}
+			},
+			removeEventListener: function () {}
+		};
+		parentDocuments.push(stub);
+		return stub;
+	}
+	function createFrameStub(document, parent) {
+		return { document: document, parent: parent };
+	}
+
+	var editorDocument = createDocumentStub("editor");
+	var apiDocument = createDocumentStub("api");
+	var apiFrame = createFrameStub(apiDocument, null);
+	var editorFrame = createFrameStub(editorDocument, apiFrame);
+	// `window.parent` of a top-level frame is the frame itself, which is what makes
+	// the plugin's walk terminate.
+	apiFrame.parent = apiFrame;
+	windowStub.parent = editorFrame;
+
+	// A host that keeps plugins on an opaque origin: every reach into the parent
+	// throws, and the plugin must degrade instead of breaking.
+	if (options.parentAccessThrows) {
+		Object.defineProperty(windowStub, "parent", {
+			get: function () {
+				throw new Error("SecurityError: Blocked a frame with origin file:// from accessing a frame");
+			}
+		});
+	}
+
+	// Delivers a key event the way the host does: a capture-phase listener on the
+	// *editor* document sees it first (that document owns the hidden TEXTAREA the SDK
+	// types into), and it is the modifier flags a real keystroke carries - which, as
+	// measured, are all false for a chord.
+	function makeKeyEvent(spec) {
+		spec = spec || {};
+		var event = {
+			key: spec.key || "",
+			code: spec.code || "",
+			keyCode: spec.keyCode || 0,
+			ctrlKey: !!spec.ctrl,
+			altKey: !!spec.alt,
+			shiftKey: !!spec.shift,
+			metaKey: !!spec.meta,
+			repeat: !!spec.repeat,
+			altGraph: !!spec.altGraph,
+			stopped: false,
+			prevented: false,
+			stopPropagation: function () {
+				event.stopped = true;
+			},
+			preventDefault: function () {
+				event.prevented = true;
+			},
+			getModifierState: function (name) {
+				return name === "AltGraph" ? event.altGraph : false;
+			}
+		};
+		return event;
+	}
+
+	function dispatchKey(type, spec) {
+		var event = makeKeyEvent(spec);
+		editorDocument.listeners[type].slice().forEach(function (entry) {
+			entry.handler(event);
+		});
+		return event;
+	}
+
+	harness.parentDocuments = parentDocuments;
+	harness.pressKey = function (spec) {
+		return dispatchKey("keydown", spec);
+	};
+	harness.releaseKey = function (spec) {
+		return dispatchKey("keyup", spec);
+	};
+	// The chord as the host actually delivers it: the modifier keydown, then the
+	// bound key carrying no modifier flag at all, then the keyups.
+	harness.pressAltChord = function (code, key) {
+		var altDown = dispatchKey("keydown", { key: "Alt", code: "AltLeft", keyCode: 18, alt: true });
+		var chord = dispatchKey("keydown", { key: key, code: code, keyCode: key === "l" ? 76 : 77 });
+		dispatchKey("keyup", { key: key, code: code });
+		dispatchKey("keyup", { key: "Alt", code: "AltLeft", keyCode: 18 });
+		return { altDown: altDown, chord: chord };
+	};
+
 	context.window = windowStub;
 	context.self = windowStub;
 	context.console = console;
@@ -293,6 +392,39 @@ function createHarness(editor, options) {
 		},
 		convert: function (mode) {
 			return windowStub.OnlyOfficeLatexMathApi.convert(mode);
+		},
+		// The hotkey surface. `pressAltChord` replays the *real* sequence measured in
+		// plan section 2.3: the modifier keydown, then the bound key with every
+		// modifier flag false, then the keyups.
+		pressKey: function (spec) {
+			return harness.pressKey(spec);
+		},
+		releaseKey: function (spec) {
+			return harness.releaseKey(spec);
+		},
+		pressAltChord: function (code, key) {
+			return harness.pressAltChord(code, key);
+		},
+		countParentListeners: function (type) {
+			return parentDocuments.reduce(function (total, doc) {
+				return total + doc.listeners[type || "keydown"].length;
+			}, 0);
+		},
+		listenerCounts: function () {
+			return parentDocuments.map(function (doc) {
+				return { label: doc.label, keydown: doc.listeners.keydown.length, keyup: doc.listeners.keyup.length };
+			});
+		},
+		attachHotkeys: function () {
+			windowStub.OnlyOfficeLatexMathApi.attachHotkeys();
+		},
+		getHotkeyStatus: function () {
+			return windowStub.OnlyOfficeLatexMathApi.getHotkeyStatus();
+		},
+		createHotkeyMatcher: function () {
+			return windowStub.OnlyOfficeLatexMathApi.createHotkeyMatcher(
+				windowStub.OnlyOfficeLatexMathApi.getHotkeys()
+			);
 		},
 		// `Asc.plugin.button(id, windowId)` is what the host's injected router
 		// calls for the dialog's header X (-1) and for every footer button. The

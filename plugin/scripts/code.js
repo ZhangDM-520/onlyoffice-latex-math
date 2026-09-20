@@ -27,7 +27,6 @@
 	// The editor answers callCommand asynchronously; without a backstop a dropped
 	// callback would leave the UI waiting forever.
 	var COMMAND_TIMEOUT_MS = 30000;
-	var HOTKEY_KEY_CODE = 77; // "M"
 	// Upper bound on how long the plugin waits for the host to confirm that the
 	// editor shell is up before publishing the menus anyway.
 	var PUBLISH_BACKSTOP_MS = 1500;
@@ -630,12 +629,283 @@
 		window.OnlyOfficeLatexMathContextMenu = root;
 	}
 
-	function isHotkey(event) {
-		if (!event) {
+	/* ------------------------------------------------------------------ *
+	 * Hotkeys
+	 *
+	 * There is no plugin shortcut API in this build and the host's own key
+	 * event never reaches a plugin at document level (see `register`), so the
+	 * plugin listens to the editor's document itself. The plugin frame is a
+	 * child of the editor's main frame and both are `file://` origin, so
+	 * `window.parent.document` is reachable - measured live, plan section 2.2.
+	 * ------------------------------------------------------------------ */
+
+	// A chord does NOT arrive with its modifiers (measured).
+	//
+	// Measured with injected keystrokes against 9.4.0.130-1 on Linux/X11 (plan
+	// section 2.3, the only input path available when driving the app from a
+	// terminal): holding Alt and pressing L delivers *two* events - `Alt` (key
+	// "Alt", altKey true) and then `l` with keyCode 76, code "KeyL" and EVERY
+	// modifier flag false - and the editor inserts that `l` into the document as
+	// text. `Ctrl+Alt+M` behaves identically (both flags false, an `m` inserted).
+	// Whether a *physical* chord keeps its flags is untested; Chromium's
+	// access-key pass is the likely cause of the loss, and the matcher accepts
+	// both shapes so it does not matter.
+	//
+	// Consequences, and why this matcher is shaped the way it is:
+	//   - a chord is recognised from the MODIFIER key presses that precede the
+	//     bound key as well as from the bound key's own flags;
+	//   - the modifier set must match the binding EXACTLY, which is what keeps a
+	//     plain `l` and an ordinary `Ctrl+L` out of the branch;
+	//   - a claimed key must be swallowed, or it lands in the document.
+	//
+	// Do not "simplify" this back to a `keyCode === 76` or `event.altKey` test.
+	var HOTKEYS = [
+		{ code: "KeyL", key: "l", mods: ["Alt"], action: "selection" }
+	];
+	// A modifier keyup the plugin never saw must not leave a chord armed forever.
+	// A real chord is pressed within this window of its modifier.
+	var CHORD_MODIFIER_WINDOW_MS = 1500;
+	var MODIFIER_KEYS = { Control: "Control", Alt: "Alt", Shift: "Shift", Meta: "Meta" };
+	var MODIFIER_CODES = {
+		ControlLeft: "Control",
+		ControlRight: "Control",
+		AltLeft: "Alt",
+		AltRight: "Alt",
+		ShiftLeft: "Shift",
+		ShiftRight: "Shift",
+		MetaLeft: "Meta",
+		MetaRight: "Meta"
+	};
+
+	function modifierName(event) {
+		if (event.key && MODIFIER_KEYS[event.key]) {
+			return MODIFIER_KEYS[event.key];
+		}
+		if (event.code && MODIFIER_CODES[event.code]) {
+			return MODIFIER_CODES[event.code];
+		}
+		return null;
+	}
+
+	function sameModifierSet(a, b) {
+		if (!a || !b || a.length !== b.length) {
 			return false;
 		}
-		var keyCode = event.keyCode || event.which;
-		return keyCode === HOTKEY_KEY_CODE && !!(event.ctrlKey && event.altKey) && !event.shiftKey;
+		return a.every(function (name) {
+			return b.indexOf(name) >= 0;
+		});
+	}
+
+	function altGraphHeld(event) {
+		try {
+			return typeof event.getModifierState === "function" && !!event.getModifierState("AltGraph");
+		} catch (e) {
+			return false;
+		}
+	}
+
+	/**
+	 * Turns the raw key stream into an action name, or `null` when the key is not
+	 * ours.
+	 *
+	 * Everything it knows comes from the events handed to it plus the `now` the
+	 * caller passes, so the whole rule set - including the timing - is testable
+	 * without a browser.
+	 */
+	function createHotkeyMatcher(bindings) {
+		var pressed = {};
+		var lastModifierAt = null;
+
+		function armedSet(now) {
+			if (lastModifierAt === null || now - lastModifierAt > CHORD_MODIFIER_WINDOW_MS) {
+				// Nothing armed: a missed modifier keyup must not poison a later
+				// keystroke.
+				return null;
+			}
+			return Object.keys(pressed);
+		}
+
+		// When the host does report modifiers (a browser build, or one that does
+		// not consume them) the reported flags win; otherwise the modifier keys
+		// that were seen do.
+		function reportedSet(event) {
+			var set = [];
+			if (event.ctrlKey) {
+				set.push("Control");
+			}
+			if (event.altKey) {
+				set.push("Alt");
+			}
+			if (event.shiftKey) {
+				set.push("Shift");
+			}
+			if (event.metaKey) {
+				set.push("Meta");
+			}
+			return set.length ? set : null;
+		}
+
+		function match(event, mods) {
+			var code = event.code || "";
+			var key = typeof event.key === "string" ? event.key.toLowerCase() : "";
+			for (var i = 0; i < bindings.length; i++) {
+				var binding = bindings[i];
+				if (code !== binding.code && key !== binding.key) {
+					continue;
+				}
+				if (sameModifierSet(mods, binding.mods)) {
+					return binding.action;
+				}
+			}
+			return null;
+		}
+
+		return {
+			keydown: function (event, now) {
+				if (!event) {
+					return null;
+				}
+				var name = modifierName(event);
+				if (name) {
+					// Recorded, never claimed: Alt on its own keeps its normal
+					// behaviour (it is also how a chord is announced).
+					pressed[name] = true;
+					lastModifierAt = now;
+					return null;
+				}
+				var mods = reportedSet(event);
+				if (!mods) {
+					mods = armedSet(now) || [];
+				}
+				var action = null;
+				if (!event.repeat && !altGraphHeld(event)) {
+					// Auto-repeat must not convert over and over; `AltGr` shows up
+					// as Control+Alt on layouts that type with it.
+					action = match(event, mods);
+				}
+				// Any other key consumes the chord state: a chord belongs to the
+				// key that completed it.
+				pressed = {};
+				lastModifierAt = null;
+				return action;
+			},
+			keyup: function (event) {
+				var name = event ? modifierName(event) : null;
+				if (!name) {
+					return;
+				}
+				delete pressed[name];
+				if (Object.keys(pressed).length === 0) {
+					lastModifierAt = null;
+				}
+			},
+			reset: function () {
+				pressed = {};
+				lastModifierAt = null;
+			},
+			armed: function (now) {
+				return armedSet(now) || [];
+			}
+		};
+	}
+
+	var hotkeyStatus = { attached: 0, blocked: 0, chords: HOTKEYS.map(function (binding) {
+		return binding.mods.join("+") + "+" + binding.key.toUpperCase();
+	}) };
+	var hotkeyMarker = "onlyOfficeLatexMathHotkey" + (window.Asc.plugin.guid || "");
+
+	function nowMs() {
+		if (window.Date && typeof window.Date.now === "function") {
+			return window.Date.now();
+		}
+		return new Date().getTime();
+	}
+
+	function attachToDocument(doc, matcher) {
+		if (doc[hotkeyMarker]) {
+			return; // idempotent: a re-init must not double-fire
+		}
+		function onKeyDown(event) {
+			var action = null;
+			try {
+				action = matcher.keydown(event, nowMs());
+			} catch (e) {
+				console.error("[latex-math] hotkey matcher failed", e);
+				return;
+			}
+			if (!action) {
+				return;
+			}
+			// Claim the key before the editor turns it into text (measured: an
+			// unclaimed `l` lands in the document). `stopPropagation` keeps the
+			// event from ever reaching the SDK's own keyboard sink.
+			if (typeof event.stopPropagation === "function") {
+				event.stopPropagation();
+			}
+			if (typeof event.preventDefault === "function") {
+				event.preventDefault();
+			}
+			convert(action);
+		}
+		function onKeyUp(event) {
+			matcher.keyup(event);
+		}
+		doc.addEventListener("keydown", onKeyDown, true);
+		doc.addEventListener("keyup", onKeyUp, true);
+		try {
+			doc[hotkeyMarker] = true;
+		} catch (e) {
+			/* a document that refuses the marker is still attached */
+		}
+		hotkeyStatus.attached++;
+	}
+
+	/**
+	 * Install the listener in the editor's document.
+	 *
+	 * Walked upwards from `window.parent` because the plugin frame's parent is the
+	 * editor's main frame (the frame that owns the hidden `TEXTAREA` the SDK reads
+	 * keys from). Every step is guarded: a host that puts plugins on an opaque
+	 * origin (the shipped AI plugin is loaded from `onlyoffice://plugin`) can only
+	 * make the attach fail, never break the rest of the plugin.
+	 */
+	function attachHotkeys() {
+		var matcher = createHotkeyMatcher(HOTKEYS);
+		var frame = null;
+		try {
+			frame = window.parent;
+		} catch (e) {
+			frame = null;
+		}
+		for (var depth = 0; frame && frame !== window && depth < 10; depth++) {
+			var next = null;
+			try {
+				next = frame.parent;
+			} catch (e) {
+				next = null;
+			}
+			try {
+				var doc = frame.document;
+				if (doc && typeof doc.addEventListener === "function") {
+					attachToDocument(doc, matcher);
+				} else {
+					hotkeyStatus.blocked++;
+				}
+			} catch (e) {
+				hotkeyStatus.blocked++;
+			}
+			// A top-level frame's `parent` is itself, which is what ends the walk
+			// (the depth bound is only a backstop).
+			frame = next === frame ? null : next;
+		}
+
+		if (hotkeyStatus.attached === 0) {
+			console.error("[latex-math] no document reached; the hotkeys are unavailable");
+		} else {
+			console.log(
+				"[latex-math] " + hotkeyStatus.chords.join(", ") + " attached to " + hotkeyStatus.attached + " document(s)"
+			);
+		}
 	}
 
 	function register() {
@@ -644,25 +914,19 @@
 		}
 		prepared = true;
 
-		// Ctrl+Alt+M converts the whole document.
+		// The host's plugin key event is NOT a shortcut channel in this build.
 		//
-		// Measured limitation (onlyoffice-git 9.4.0.130-1): the word editor only
-		// calls `g_asc_plugins.onPluginEvent2("onKeyDown", ...)` from inside the
+		// Measured (onlyoffice-git 9.4.0.130-1): the word editor only calls
+		// `g_asc_plugins.onPluginEvent2("onKeyDown", ...)` from inside the
 		// `isInputHelpersPresent` branch of its key handler, i.e. while a form
 		// control / content control input helper owns the keyboard, and only for
 		// navigation keys (Tab, Enter, arrows, Home/End, PageUp/Down, Escape).
-		// There is therefore no document-level plugin shortcut in this build -
-		// the shipped API has no `shortcut` field either. The handler is kept
-		// because it is correct wherever the event does arrive, and because a
-		// future build may widen the dispatch.
-		window.Asc.plugin.attachEvent("onKeyDown", function (event) {
-			if (!isHotkey(event)) {
-				return;
-			}
-			// The dispatcher above only spends navigation keys, so a real
-			// Ctrl+Alt+M never reaches this line today.
-			convert("document");
-		});
+		// The shipped API has no `shortcut` field either. An `onKeyDown` handler
+		// here could therefore never fire for a real chord - the `Ctrl+Alt+M`
+		// handler this plugin used to register was dead code, and was removed
+		// rather than kept as advertisement. `attachHotkeys` is the channel that
+		// actually works.
+		attachHotkeys();
 	}
 
 	/**
@@ -796,6 +1060,16 @@
 		readDocument: readDocument,
 		showLastReport: showLastReport,
 		closeReportWindow: closeReportWindow,
+		// Re-running the attach is harmless (the document marker makes it
+		// idempotent) and is how the hotkeys can be inspected from the console.
+		attachHotkeys: attachHotkeys,
+		createHotkeyMatcher: createHotkeyMatcher,
+		getHotkeys: function () {
+			return HOTKEYS;
+		},
+		getHotkeyStatus: function () {
+			return { attached: hotkeyStatus.attached, blocked: hotkeyStatus.blocked, chords: hotkeyStatus.chords.slice() };
+		},
 		getSettings: function () {
 			return settings;
 		},

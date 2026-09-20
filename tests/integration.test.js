@@ -494,7 +494,11 @@ test("the menus are withheld while the editor is still booting", async () => {
 	harness.initOnly();
 	assert.strictEqual(harness.harness.toolbarRegistered, undefined, "not published from init alone");
 	assert.strictEqual(harness.harness.roots.length, 0, "menus are not even built yet");
-	assert.strictEqual(typeof harness.harness.events.onKeyDown, "function", "events are attached immediately");
+	assert.strictEqual(
+		harness.getHotkeyStatus().attached,
+		2,
+		"the hotkey listeners are attached immediately, whatever the menus are waiting for"
+	);
 
 	harness.translate();
 	assert.strictEqual(harness.harness.toolbarRegistered, true, "onTranslate publishes the menus");
@@ -609,7 +613,11 @@ test("the plugin initialises, registers menus and converts through the bridge", 
 	assert.strictEqual(h.contextMenuRegistered, true);
 	assert.ok(h.roots.length >= 1, "a toolbar root was created");
 	assert.ok(h.roots[0].children.length >= 6, "toolbar root has its menu items");
-	assert.strictEqual(typeof h.events.onKeyDown, "function");
+	// The host's plugin key event is not a shortcut channel in this build; the
+	// DOM listener is, and this is what proves it was installed.
+	assert.strictEqual(h.events.onKeyDown, undefined, "no onKeyDown registration is made");
+	assert.strictEqual(JSON.stringify(harness.getHotkeyStatus().chords), '["Alt+L"]');
+	assert.strictEqual(harness.getHotkeyStatus().attached, 2, "editor frame and its parent");
 
 	const report = await harness.convert("document");
 
@@ -633,20 +641,8 @@ test("the plugin initialises, registers menus and converts through the bridge", 
 	);
 });
 
-test("the hotkey converts only on Ctrl+Alt+M", async () => {
-	const editor = createEditor({ paragraphs: ["$h$"] });
-	const harness = createHarness(editor);
-	harness.init();
-	const onKeyDown = harness.harness.events.onKeyDown;
-
-	await onKeyDown({ keyCode: 77, ctrlKey: false, altKey: false, shiftKey: false });
-	await onKeyDown({ keyCode: 77, ctrlKey: true, altKey: false, shiftKey: false });
-	await onKeyDown({ keyCode: 65, ctrlKey: true, altKey: true, shiftKey: false });
-	assert.strictEqual(editor.maths().length, 0, "only Ctrl+Alt+M may convert");
-
-	await onKeyDown({ keyCode: 77, ctrlKey: true, altKey: true, shiftKey: false });
-	assert.strictEqual(editor.maths().length, 1);
-});
+// The hotkey itself (matcher rules, the DOM listener and the real `Alt+L`
+// sequence) lives in `tests/hotkey.test.js`, next to the measurement notes.
 
 test("delimiter toggles persist and are honoured", async () => {
 	const editor = createEditor({ paragraphs: ["$x$ and \\(y\\)"] });
