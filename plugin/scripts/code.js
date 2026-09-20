@@ -371,11 +371,22 @@
 					reportLine(report, tr("Outside the selection") + ": " + plan.skipped.length);
 				}
 				if (plan.warnings.length > 0) {
-					var byCode = {};
+					// Two buckets, because they ask the author for different things.
+					// An unterminated delimiter is a typo to fix; a span a *guard*
+					// refused ("$5 and $6") is the guard working, and lumping the two
+					// together made a page of prices read as malformed LaTeX.
+					var malformed = {};
+					var guarded = {};
 					plan.warnings.forEach(function (warning) {
-						byCode[warning.code] = (byCode[warning.code] || 0) + 1;
+						var bucket = warning.code.indexOf("guarded-") === 0 ? guarded : malformed;
+						bucket[warning.code] = (bucket[warning.code] || 0) + 1;
 					});
-					reportLine(report, tr("Malformed delimiters") + ": " + JSON.stringify(byCode));
+					if (Object.keys(malformed).length > 0) {
+						reportLine(report, tr("Malformed delimiters") + ": " + JSON.stringify(malformed));
+					}
+					if (Object.keys(guarded).length > 0) {
+						reportLine(report, tr("Left as text by a guard") + ": " + JSON.stringify(guarded));
+					}
 				}
 
 				if (!plan.operations.length) {

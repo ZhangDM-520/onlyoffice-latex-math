@@ -185,6 +185,9 @@ Guard decisions taken while auditing the four delimiter branches (each one is a 
 | A blank line inside `$$…$$` / `\[…\]` | **rejected**, which is what the README always claimed. The scanner sees one paragraph at a time, so a delimiter separated from its partner by an empty line was never closed. A single soft break stays legal (`"$$\na + b\n$$"`). |
 | `\(…\)` across a line | **rejected**: `\(…\)` is inline by definition, so it is single-line like `$...$`. Its previous `allowNewline: true` was the odd one out. |
 | An empty body | **reported** on all four delimiters. Only the `$$` branch warned, so `\(\)` and `\[\]` were silent no-ops; the inline branch's empty case is reachable too (`$$x$` with the display delimiter switched off). |
+| An opener followed by whitespace or by punctuation | **not a span** (`CANNOT_START_MATH` = `)]},.;:?!%'"`, plus the whitespace rule). Pinned by fixtures for both, with the deliberate counter-example `Note($i$)` — an *opening* bracket after the opener is still math. |
+| An opener with **no rule about the character before it** | **accepted**, deliberately. `x$y$z` and `f(x)$=y$` are read as math. A preceding-character rule would also reject `text=$x$`, which an author plausibly writes; the guard is not extended without a demonstrated failure. Pinned as a fixture so a later change has to face the decision. |
+| A closer a guard refused | reported as `guarded-inline-dollar`, **not** `unterminated-inline-dollar`, and the loop steps past the refused `$` so it is not re-read as an opener. Before: a page of prices produced one bogus "unterminated" per `$` and the report's *Malformed delimiters* line was noise. Genuinely unmatched openers (`Pay $100 now.`) still report as malformed. |
 
 `aligned` was removed from the read command in the same pass: it was a per-paragraph comparison nothing
 read, and keeping a field that *looks* like a gate is how §1.7 happened.
@@ -343,6 +346,8 @@ tab.
 
 | Check | Result |
 | :--- | :--- |
+| **(5)** Warnings are bucketed | *Malformed delimiters* (a real typo to fix) and *Left as text by a guard* (the guard working) are separate report lines. Before: `Cost $5, save $2, math $x$ here.` produced two `unterminated-inline-dollar` warnings and the report told the author their LaTeX was broken |
+| **(5)** A lone unmatched `$` | `Pay $100 now.` still reports `Malformed delimiters: {"unterminated-inline-dollar":1}` — the bucketing must not hide a genuine typo |
 | **(5)** Right-click tree **as the host composes it** | `Asc.plugin._events.onContextMenuShow({type:1})` → `AddContextMenuItem` with **one** item, `{"id":…,"text":"LaTeX math","lockInViewMode":true,"disabled":false,"icons":…}`. There is **no `items` key**, i.e. a plain clickable row, not a submenu — and it still passes the checker gate |
 | **(5)** Ribbon tab **as the host composes it** | `AddToolbarMenuItem` → one tab, `items` = `Show last report`, `✓ $...$` (with `separator`), `✓ $$...$$`, `✓ \(...\)`, `✓ \[...\]`, `✗ Report window`. No conversion entry exists; the tab is the root, so it cannot carry one anyway (§1.11) |
 | **(5)** Icons actually rendered in the ribbon DOM | six, all at `…/big/*@1.25x.png` (the active display scale): `report`, `inline-dollar`, `display-dollar`, `inline-paren`, `display-bracket`, `report-off`. No `document`/`display` reference survives |
@@ -358,7 +363,7 @@ tab.
 | Report window close affordances | header X, footer *Close* and `Esc` each close it; a second report is a fresh window with current numbers |
 | Reports silent by default | conversion opens no window (`openReport=false`); *Show last report* opens one on demand |
 | **Reported bug**: `$$x=1$$` not detected | before: `Scanned: 0 paragraphs` / `Skipped paragraphs whose text offsets cannot be mapped: 3` / `Nothing to convert.` — after: `Scanned: 3 paragraphs, 1 LaTeX spans found (1 display)`, `Converted: 1 / 1` |
-| The same document's paragraph offsets, read live | all three `aligned: false`; `collectParagraphs` keeps 3, `unusable: 0` |
+| The same document's paragraph offsets, read live | every paragraph's range span is **shorter than its own text** (the mark is two characters in `text`, one position in the range) — the comparison the old gate relied on is false here for all three, which is why it is no longer computed |
 | Legacy equation (`a=∑▒n_i`) beside the conversion | its OMML byte-identical; the paragraph only gains `highlight none` on an empty run, from the editor's own save |
 | `Ctrl+S` after the fix | one `m:oMathPara` for the converted span, no `$` left in the file |
 | One undo after the fixed run | ` $$x=1$$` restored verbatim |
@@ -381,7 +386,7 @@ look: a conversion must not consume neighbouring characters.
 
 ## 4. Test layout
 
-`node --test tests/` → 105 tests.
+`node --test tests/` → 117 tests.
 
 * `scan.test.js` — the delimiter core: escapes, currency guard, `$$` precedence, unterminated spans,
   the blank-line rule, the guard decisions (a whitespace-preceded closer abandons its opener without

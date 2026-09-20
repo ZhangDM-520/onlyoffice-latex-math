@@ -70,8 +70,13 @@ function declaredPaths() {
 	harness.init();
 	const h = harness.harness;
 
+	// `roots` also holds the throwaway parentless item `updateToolbarMenu` builds,
+	// so the *same* tree can be walked more than once. Key by icon path: what
+	// matters is which icons the host will ask for, not how often it was told.
+	const seen = {};
 	function collect(item, source) {
-		if (item.icons) {
+		if (item.icons && !seen[item.icons]) {
+			seen[item.icons] = true;
 			paths.push({
 				icons: item.icons,
 				base: /\/big\//.test(item.icons) ? RIBBON_BASE : MENU_BASE,
@@ -87,7 +92,6 @@ function declaredPaths() {
 		return item.itemType === "toolbar";
 	}).forEach(function (item) {
 		collect(item, "the ribbon");
-		collect(item, item.text);
 	});
 	h.roots.filter(function (item) {
 		return item.itemType === "contextMenu";
@@ -124,7 +128,11 @@ test("every ribbon item and every context menu item carries an icon", () => {
 
 test("every icon resolves at every scale, at the right size, with ink in it", () => {
 	const declared = declaredPaths().paths;
-	assert.ok(declared.length >= 8, "collected the plugin's icon declarations");
+	// Every distinct slot the plugin declares, and nothing else: the entry icon
+	// plus the one slot per surface. A count below this means the walk missed part
+	// of the tree, which is the thing the test exists to catch - an earlier
+	// version asserted `>= 8`, which could not have caught the loss of a slot.
+	assert.strictEqual(declared.length, 9, "collected every icon the plugin declares");
 
 	const seen = {};
 	declared.forEach(function (entry) {

@@ -9,6 +9,7 @@
 	"display": "独立公式",
 	"Paragraphs that could not be read": "无法读取的段落",
 	"Outside the selection": "选中范围之外",
+	"Left as text by a guard": "被判为正文、未转换",
 	"Malformed delimiters": "格式错误的定界符",
 	"Nothing to convert.": "没有需要转换的内容。",
 	"Converted": "已转换",

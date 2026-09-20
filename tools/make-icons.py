@@ -230,12 +230,14 @@ def owned_paths():
 
 
 def prune(quiet=False):
-    """Delete icon files the manifest no longer owns.
+    """Delete anything under `RESOURCES` that the manifest does not own.
 
-    Without this the generator only ever *adds*: retiring a slot leaves its 40 PNGs
-    on disk, and `--check` cannot see them because it iterates the manifest. The
-    tree then stops being the manifest, which is how the `document`/`display`
-    leftovers appeared after the ribbon was reduced to settings.
+    Scope is everything under `plugin/resources`, not only the icons: the point is
+    that the tree on disk *is* the manifest. Without it the generator only ever
+    adds, so retiring a slot leaves its PNGs behind and `--check` cannot see them
+    (it iterates the manifest). That is exactly how the `document`/`display`
+    leftovers appeared after the ribbon was reduced to settings. The vendored
+    licence file is registered in `expected_files()`, so it is owned, not deleted.
     """
     owned = owned_paths()
     removed = []

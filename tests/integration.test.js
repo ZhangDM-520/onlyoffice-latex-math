@@ -895,3 +895,47 @@ test("a settings record written after the upgrade is honoured", () => {
 	assert.strictEqual(stored.version, 2);
 	assert.strictEqual(stored.openReport, true);
 });
+
+// The report split, which is the user-visible half of the guarded-warning fix. A
+// document containing prices used to fill the *Malformed delimiters* line with
+// "unterminated-inline-dollar", telling the author their LaTeX was broken when in
+// fact the currency guard had done its job.
+test("a document of prices reports a guard, not malformed LaTeX", async () => {
+	const editor = createEditor({ paragraphs: ["Cost $5, save $2, math $x$ here."] });
+	const harness = createHarness(selectAll(editor));
+	harness.init();
+
+	await harness.convertSelection();
+	const lines = harness.getLastReport().lines;
+
+	assert.ok(
+		lines.some((line) => line.includes("Converted: 1 / 1")),
+		JSON.stringify(lines)
+	);
+	assert.ok(
+		!lines.some((line) => line.includes("Malformed delimiters")),
+		"nothing in this text is malformed: " + JSON.stringify(lines)
+	);
+	assert.ok(
+		lines.some((line) => line.includes("Left as text by a guard") && line.includes("guarded-inline-dollar")),
+		JSON.stringify(lines)
+	);
+});
+
+test("a genuinely unmatched dollar still reports as malformed", async () => {
+	const editor = createEditor({ paragraphs: ["Pay $100 now."] });
+	const harness = createHarness(selectAll(editor));
+	harness.init();
+
+	await harness.convertSelection();
+	const lines = harness.getLastReport().lines;
+
+	assert.ok(
+		lines.some((line) => line.includes("Malformed delimiters") && line.includes("unterminated-inline-dollar")),
+		JSON.stringify(lines)
+	);
+	assert.ok(
+		!lines.some((line) => line.includes("Left as text by a guard")),
+		"a lone `$` is not a guard rejection: " + JSON.stringify(lines)
+	);
+});

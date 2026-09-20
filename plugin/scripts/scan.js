@@ -30,6 +30,13 @@
 			displayBracket: true
 		},
 		// A `$` closing delimiter may not be followed by a digit ("$1 and $2").
+		//
+		// The *scanner* exposes this as an option because the rule belongs to the
+		// scanner and its own tests exercise both settings; the *plugin* has no
+		// toggle for it and always passes `true` (see code.js scannerOptions). That
+		// asymmetry is deliberate: an option a product never sets is still the right
+		// shape for a pure function, and the guard's effect is asserted from both
+		// sides.
 		currencyGuard: true,
 		// Keep the raw content, newlines collapsed into single spaces.
 		collapseNewlines: true
@@ -98,26 +105,40 @@
 
 	/**
 	 * Locate the closing delimiter for a `$...$` span.
-	 * Returns the index of the closing `$`, or -1 when there is none.
+	 *
+	 * Returns `{index, guarded}`:
+	 *   `{index: -1}`            **none**: the search reached the end of the line
+	 *                            without finding a candidate at all, so the opener
+	 *                            really is unterminated.
+	 *   `{index: n, guarded: true}`  a `$` at `n` was found but a *guard* refused it
+	 *                            (currency, or a space before the closer). The text
+	 *                            is not math - and reporting it as "unterminated"
+	 *                            made a document full of prices read as though it
+	 *                            were full of malformed delimiters.
+	 *   `{index: n, guarded: false}`  a usable closer.
+	 *
+	 * The refused index is returned so the caller can step *past* it: a `$` a guard
+	 * has just rejected as a closer must not be immediately re-offered as an
+	 * opener, or `$10-$20` reports one guarded span and one phantom unterminated one.
 	 */
 	function findDollarClose(text, from, options) {
 		for (var i = from; i < text.length; i++) {
 			var ch = text.charAt(i);
 			if (ch === "\n" || ch === "\r") {
-				return -1; // inline math never spans lines
+				return { index: -1 }; // inline math never spans lines
 			}
 			if (ch !== "$" || isEscaped(text, i)) {
 				continue;
 			}
 			if (options.currencyGuard && isDigit(text.charAt(i + 1))) {
-				return -1; // "$5 ... $6" is currency, not math
+				return { index: i, guarded: true }; // "$5 ... $6" is currency, not math
 			}
 			if (isWhitespace(text.charAt(i - 1))) {
-				return -1; // "live $x , 5$ " style false positive
+				return { index: i, guarded: true }; // "live $x , 5$ " style false positive
 			}
-			return i;
+			return { index: i, guarded: false };
 		}
-		return -1;
+		return { index: -1 };
 	}
 
 	/**
@@ -226,6 +247,7 @@
 					handled = true;
 					i = closeDollar + 2;
 				} else {
+					// pushSpan refused: the body was empty or whitespace only.
 					warnings.push({ code: "empty-span", index: i });
 				}
 			} else if (
@@ -235,15 +257,21 @@
 				canStartInlineMath(text, i + 1)
 			) {
 				var closeInline = findDollarClose(text, i + 1, opts);
-				if (closeInline === -1) {
+				if (closeInline.index === -1) {
 					warnings.push({ code: "unterminated-inline-dollar", index: i });
+				} else if (closeInline.guarded) {
+					// A guard refused the closer: not a malformed span, a non-span.
+					// Step past the refused `$` so it is not re-read as an opener.
+					warnings.push({ code: "guarded-inline-dollar", index: i });
+					handled = true;
+					i = closeInline.index + 1;
 				} else if (
 					pushSpan(
 						spans,
 						text,
 						i,
-						closeInline + 1,
-						text.substring(i + 1, closeInline),
+						closeInline.index + 1,
+						text.substring(i + 1, closeInline.index),
 						false,
 						"$",
 						"$",
@@ -251,7 +279,7 @@
 					)
 				) {
 					handled = true;
-					i = closeInline + 1;
+					i = closeInline.index + 1;
 				} else {
 					// Reachable: with the display delimiter switched off, "$$x$"
 					// offers an empty body to this branch.
@@ -278,6 +306,7 @@
 					handled = true;
 					i = closeParen + 2;
 				} else {
+					// pushSpan refused: the body was empty or whitespace only.
 					warnings.push({ code: "empty-span", index: i });
 				}
 			} else if (opts.delimiters.displayBracket && text.substr(i, 2) === "\\[" && !isEscaped(text, i)) {
@@ -300,6 +329,7 @@
 					handled = true;
 					i = closeBracket + 2;
 				} else {
+					// pushSpan refused: the body was empty or whitespace only.
 					warnings.push({ code: "empty-span", index: i });
 				}
 			}

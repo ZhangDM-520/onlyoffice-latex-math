@@ -180,7 +180,7 @@ goes missing.
 ## Tests
 
 ```bash
-node --test tests/          # 105 tests: scanner, icons, hotkeys, harness, integration, report
+node --test tests/          # 117 tests: scanner, icons, hotkeys, harness, integration, report
 ```
 
 `plugin/scripts/scan.js` is the pure core (delimiter rules, offset planning) and is deliberately free

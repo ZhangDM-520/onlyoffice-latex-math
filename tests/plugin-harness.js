@@ -173,6 +173,12 @@ function createHarness(editor, options) {
 	// `parent === null` becomes the **tab** and its own `toItem()` is never emitted,
 	// so every ribbon button is a child of the root. That is why a plugin cannot
 	// make the tab itself an action.
+	//
+	// The "items only when there are children" rule appears in three places here
+	// (`Matcher.prototype.toItem`, `build()` in composeContextMenu, and this
+	// projection) on purpose: each mirrors a *different* host function, and the
+	// point of the mirror is to reproduce the host's own structure rather than to
+	// share a helper with itself.
 	harness.composeToolbar = function () {
 		var tabs = [];
 		harness.roots.forEach(function (root) {

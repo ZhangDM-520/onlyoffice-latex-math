@@ -310,3 +310,75 @@ test("a paragraph with an unprovable offset still yields its spans", () => {
 		[{ start: 12, end: 15, latex: "x", expected: "$x$" }]
 	);
 });
+
+// ---------------------------------------------------------------------------
+// The opener blacklist, recorded rather than left implicit.
+//
+// `CANNOT_START_MATH` keeps prose like "Cost in USD ($) is fine" from becoming a
+// span, and `canStartInlineMath` additionally refuses whitespace right after the
+// opener. Both are deliberately *not* extended further: the project's rule is that
+// nothing downstream catches a mistake (see docs/NOTE.md §1.8), so the two
+// decisions below were taken with the measured behaviour in hand and are pinned
+// here so a later change has to face them.
+// ---------------------------------------------------------------------------
+
+test("punctuation right after an opener is not math, but a bracket is fine", () => {
+	// The blacklist. Every one of these is a `$` doing duty as a currency symbol
+	// or a stray character, not a delimiter.
+	["Cost in USD ($) is fine.", "Total ($): 5", "See $, then", "Ends with $.", 'A $"quote$', "Is it $?"].forEach(
+		function (text) {
+			assert.deepStrictEqual(findMathSpans(text).spans, [], JSON.stringify(text));
+		}
+	);
+
+	// A bracket *open* after the opener is still math: "Note($i$)" reads as a
+	// parenthesised symbol, and rejecting it would cost real recall.
+	assert.deepStrictEqual(latexOf(findMathSpans("Note($i$) matters.")), ["i"]);
+});
+
+test("whitespace right after an opener is never math", () => {
+	assert.deepStrictEqual(findMathSpans("Cost $ 5 and 6$ total.").spans, []);
+	assert.deepStrictEqual(findMathSpans("Prices in $ USD fall.").spans, []);
+});
+
+// Measured, and deliberately left as-is. An opener has no rule about the
+// character *before* it, so `x$y$z` is read as math. Adding one would also reject
+// `text=$x$`, which is a plausible thing for an author to write; the guard is
+// therefore not extended without a demonstrated failure.
+test("an opener with no context rule is accepted, and that is deliberate", () => {
+	assert.deepStrictEqual(latexOf(findMathSpans("x$y$z")), ["y"]);
+	assert.deepStrictEqual(latexOf(findMathSpans("f(x)$=y$ holds.")), ["=y"]);
+	// The counter-example the rule would have to keep: no space before the opener.
+	assert.deepStrictEqual(latexOf(findMathSpans("the value is$x$ here.")), ["x"]);
+});
+
+test("a guard rejection is reported as guarded, not as a malformed delimiter", () => {
+	// "Pay $100 now." has a single `$` and no closer at all, so it really is
+	// unterminated and stays in the malformed bucket.
+	assert.deepStrictEqual(
+		findMathSpans("Pay $100 now.").warnings.map((w) => w.code),
+		["unterminated-inline-dollar"]
+	);
+
+	// A *pair* the currency guard refused is the guard working: an author should
+	// not be told their LaTeX is broken when their document contains prices.
+	const prices = findMathSpans("Cost $5, save $2, math $x$ here.");
+	assert.deepStrictEqual(latexOf(prices), ["x"]);
+	assert.ok(
+		prices.warnings.every((w) => w.code === "guarded-inline-dollar"),
+		JSON.stringify(prices.warnings)
+	);
+
+	const amounts = findMathSpans("Amount: $10-$20 total.");
+	assert.deepStrictEqual(amounts.spans, []);
+	assert.ok(
+		amounts.warnings.every((w) => w.code === "guarded-inline-dollar"),
+		JSON.stringify(amounts.warnings)
+	);
+});
+
+test("a closer after a trailing space is guarded, not unterminated", () => {
+	const result = findMathSpans("The price $x + y $ and $z$ here.");
+	assert.deepStrictEqual(latexOf(result), ["z"]);
+	assert.strictEqual(result.warnings[0].code, "guarded-inline-dollar");
+});
