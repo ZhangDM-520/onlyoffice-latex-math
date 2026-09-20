@@ -347,10 +347,21 @@
 	}
 
 	/**
-	 * Reduce a document snapshot (see commands.js) to the paragraphs whose
-	 * character offsets can be trusted. Paragraphs containing content that
-	 * renders to a different length than it counts (equations, images, tables)
-	 * are dropped rather than converted at the wrong position.
+	 * Reduce a document snapshot (see commands.js) to the paragraphs worth
+	 * scanning.
+	 *
+	 * Offsets are treated as **best effort**, deliberately. A paragraph range
+	 * counts positions, while GetText() returns characters: empty/formatting
+	 * positions render as nothing and the trailing paragraph mark renders as
+	 * `\r\n` (two characters for one position), so `end - start === text.length`
+	 * is false for practically every paragraph - including plain prose with no
+	 * math in it. Gating on that comparison silently discarded whole documents.
+	 *
+	 * Safety does not depend on this filter: the apply step re-reads each span's
+	 * range and refuses to rewrite anything whose live text does not match the
+	 * source it was planned from (see APPLY_BODY's `text-mismatch`), then checks
+	 * the outcome afterwards. Paragraphs are therefore attempted rather than
+	 * discarded, and only the genuinely unreadable ones are counted as unusable.
 	 *
 	 * @param {{paragraphs: Array}} snapshot
 	 * @returns {{paragraphs: Array<{start: number, text: string}>, unusable: number}}
@@ -360,10 +371,6 @@
 		var unusable = 0;
 		((snapshot && snapshot.paragraphs) || []).forEach(function (paragraph) {
 			if (!paragraph || paragraph.start === null || typeof paragraph.text !== "string") {
-				unusable++;
-				return;
-			}
-			if (paragraph.aligned === false) {
 				unusable++;
 				return;
 			}

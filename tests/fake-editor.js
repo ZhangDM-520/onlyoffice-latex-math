@@ -18,6 +18,16 @@
 
 var PARAGRAPH_MARK_COST = 1;
 
+// The host's ApiParagraph.GetText() renders the trailing paragraph mark as CRLF
+// while the paragraph's range counts that mark as a single position. The range
+// span and the text length therefore never agree, which is why `aligned` is a
+// useless gate (see scan.js collectParagraphs) and why the offset mapping has to
+// be verified per span at apply time. Measured live on onlyoffice-git 9.4.0.130:
+// an empty paragraph gave `end - start === 3` with `text === "\r\n"`, and a
+// paragraph holding ` $$x=1$$` gave 11 positions for 8 content characters plus
+// `\r\n`, with two interior positions rendering as empty text.
+var PARAGRAPH_MARK_TEXT = "\r\n";
+
 function createEditor(options) {
 	options = options || {};
 	var paragraphs = (options.paragraphs || []).map(function (text) {
@@ -122,7 +132,7 @@ function createEditor(options) {
 		return { index: head.index, from: start - head.start, to: end - head.start };
 	}
 
-	function textBetween(start, end) {
+	function textBetween(start, end, includeParagraphMark) {
 		var located = assertSingleParagraph(start, end);
 		var segments = paragraphs[located.index].segments;
 		var text = "";
@@ -145,6 +155,12 @@ function createEditor(options) {
 			}
 			text += segmentText(segment);
 		});
+		// The paragraph's own range carries its trailing mark in its text, exactly
+		// as the host does. A sub-range ending at the same offset does not - which
+		// is why a planned span can still be verified against the live document.
+		if (includeParagraphMark) {
+			text += PARAGRAPH_MARK_TEXT;
+		}
 		return text;
 	}
 
@@ -208,7 +224,7 @@ function createEditor(options) {
 		return located.index;
 	}
 
-	function makeRange(start, end) {
+	function makeRange(start, end, includeParagraphMark) {
 		return {
 			GetStartPos: function () {
 				return start;
@@ -217,7 +233,7 @@ function createEditor(options) {
 				return end;
 			},
 			GetText: function () {
-				return textBetween(start, end);
+				return textBetween(start, end, includeParagraphMark);
 			},
 			Select: function () {
 				return true;
@@ -261,7 +277,11 @@ function createEditor(options) {
 						return paragraphText(index);
 					},
 					GetRange: function () {
-						return makeRange(paragraphStart(index), paragraphStart(index) + paragraphLength(index));
+						return makeRange(
+							paragraphStart(index),
+							paragraphStart(index) + paragraphLength(index),
+							true
+						);
 					}
 				};
 			});

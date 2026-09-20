@@ -31,5 +31,7 @@
 	"no": "no",
 	"unavailable": "unavailable",
 	"math": "math",
-	"none": "none"
+	"none": "none",
+	"Close": "Close",
+	"Report window": "Report window"
 }

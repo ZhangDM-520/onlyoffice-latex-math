@@ -73,16 +73,125 @@ test("read command reports paragraphs, offsets and alignment", () => {
 	const editor = createEditor({ paragraphs: ["First $a$", "Second paragraph"] });
 	const snapshot = read(editor);
 	assert.strictEqual(snapshot.paragraphs.length, 2);
-	assert.strictEqual(snapshot.paragraphs[0].text, "First $a$");
+	// A paragraph's own range carries its trailing mark, as the host does, so the
+	// reported text is longer than the content the offsets cover.
+	assert.strictEqual(snapshot.paragraphs[0].text, "First $a$\r\n");
 	assert.strictEqual(snapshot.paragraphs[0].start, 0);
 	// Paragraph marks occupy one document offset, so paragraph two does not
 	// start right after the first paragraph's text.
 	assert.strictEqual(snapshot.paragraphs[1].start, "First $a$".length + 1);
-	assert.strictEqual(snapshot.paragraphs[0].aligned, true);
+	assert.strictEqual(
+		snapshot.paragraphs[0].aligned,
+		false,
+		"the length comparison is informational: every paragraph fails it"
+	);
 	// With nothing highlighted the editor still reports a selection, collapsed at
 	// the caret, which is why an empty range must never be used as a filter.
 	assert.deepStrictEqual(snapshot.selection, { start: 0, end: 0 });
 	assert.strictEqual(snapshot.hasHistoryApi, true);
+});
+
+// ---------------------------------------------------------------------------
+// The owner-reported bug: no paragraph survived the offset filter.
+//
+// Reported live as "Scanned: 0 paragraphs, 0 LaTeX spans found / Skipped
+// paragraphs whose text offsets cannot be mapped: 3" for a document whose only
+// content was `$$x=1$$`. The three paragraphs measured on onlyoffice-git
+// 9.4.0.130 were:
+//
+//   "a=\u2592n_i" (legacy equation)  19 positions vs 11 characters
+//   ""                                3 positions vs  2 characters
+//   " $$x=1$$"                       11 positions vs 10 characters
+//
+// Every one of them fails `end - start === text.length`, so the gate rejected
+// the whole document. Detection now scans every paragraph and the write path
+// verifies each span against the live range.
+// ---------------------------------------------------------------------------
+
+test("a document where every paragraph fails the length comparison still converts", async () => {
+	const editor = createEditor({
+		mathRendersAsPlaceholder: true,
+		paragraphs: ["a=", "", " $$x=1$$"]
+	});
+	// The legacy old-Format equation: one position, one placeholder character.
+	editor.segments()[0].push({ type: "math", latex: "\\sum n_i" });
+
+	const snapshot = read(editor);
+	assert.deepStrictEqual(
+		snapshot.paragraphs.map((paragraph) => paragraph.aligned),
+		[false, false, false],
+		"the reported document fails the length comparison everywhere"
+	);
+
+	const harness = createHarness(editor);
+	harness.init();
+	const report = await harness.convert("document");
+
+	assert.deepStrictEqual(
+		editor.maths().map((math) => math.latex),
+		["\\sum n_i", "x=1"],
+		"the legacy equation is untouched and the span is converted"
+	);
+	assert.ok(
+		report.lines.some((line) => line.includes("Converted: 1 / 1")),
+		JSON.stringify(report.lines)
+	);
+	assert.ok(
+		report.lines.some((line) => line.includes("Scanned: 3")),
+		"all three paragraphs are scanned: " + JSON.stringify(report.lines)
+	);
+	assert.ok(
+		!report.lines.some((line) => line.includes("could not be read")),
+		"nothing was unreadable: " + JSON.stringify(report.lines)
+	);
+});
+
+test("a selection over a paragraph whose offsets cannot be proven still converts", async () => {
+	// ` $$x=1$$` is the last paragraph: "a=" plus a placeholder equation occupies
+	// offsets 0-3, the empty paragraph 4, so the text starts at 5. The span sits
+	// at text index 1, i.e. offsets 6-13.
+	const editor = createEditor({
+		mathRendersAsPlaceholder: true,
+		selection: { start: 5, end: 13 },
+		paragraphs: ["a=", "", " $$x=1$$"]
+	});
+	editor.segments()[0].push({ type: "math", latex: "\\sum n_i" });
+
+	const harness = createHarness(editor);
+	harness.init();
+	const report = await harness.convert("selection");
+
+	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["\\sum n_i", "x=1"]);
+	assert.ok(
+		report.lines.some((line) => line.includes("Converted: 1 / 1")),
+		JSON.stringify(report.lines)
+	);
+	assert.ok(
+		!report.lines.some((line) => line.includes("Outside the selection")),
+		JSON.stringify(report.lines)
+	);
+});
+
+test("a paragraph that cannot be read is reported, not silently dropped", async () => {
+	const editor = createEditor({ paragraphs: ["$broken$", "$ok$"] });
+	const realGetAllParagraphs = editor.apiDocument.GetAllParagraphs;
+	editor.apiDocument.GetAllParagraphs = function () {
+		const paragraphs = realGetAllParagraphs.call(editor.apiDocument);
+		paragraphs[0].GetRange = function () {
+			return null;
+		};
+		return paragraphs;
+	};
+
+	const harness = createHarness(editor);
+	harness.init();
+	const report = await harness.convert("document");
+
+	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["ok"]);
+	assert.ok(
+		report.lines.some((line) => line.includes("Paragraphs that could not be read: 1")),
+		JSON.stringify(report.lines)
+	);
 });
 
 test("whole-document conversion replaces every delimiter run with a math object", () => {
@@ -266,7 +375,13 @@ test("selection can be forced into display math", () => {
 	assert.strictEqual(editor.state.displayConversions.length, 1);
 });
 
-test("paragraphs with unmappable offsets are skipped instead of corrupted", () => {
+test("paragraphs with unprovable offsets are attempted and refused per span", () => {
+	// Regression for the owner-reported bug: an offset that cannot be proven 1:1
+	// used to discard the whole paragraph, which silently dropped ordinary prose
+	// too (the host's `end - start` counts positions while GetText() returns
+	// characters plus the paragraph mark). The paragraph is now scanned, and the
+	// span whose positions drifted is refused by the apply-time text check
+	// instead - a reported skip, not a corrupt document.
 	const editor = createEditor({ paragraphs: ["ok $x$ here", "has image $y$ here"] });
 	// Simulate a paragraph whose rendered text is longer than its content count.
 	const segments = editor.segments();
@@ -274,14 +389,18 @@ test("paragraphs with unmappable offsets are skipped instead of corrupted", () =
 
 	const snapshot = read(editor);
 	const collected = core.collectParagraphs(snapshot);
-	assert.strictEqual(collected.unusable, 1);
-	assert.strictEqual(collected.paragraphs.length, 1);
+	assert.strictEqual(collected.unusable, 0, "an unprovable offset must not discard the paragraph");
+	assert.strictEqual(collected.paragraphs.length, 2);
 
 	const plan = core.planReplacements(collected.paragraphs, PLUGIN_DEFAULTS, null);
+	assert.strictEqual(plan.operations.length, 2, "both spans are planned; the write path decides");
+
 	const result = apply(editor, plan);
 	assert.strictEqual(result.applied.length, 1);
 	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["x"]);
-	assert.ok(editor.text().includes("$y$"), "the unmappable paragraph keeps its source text");
+	assert.strictEqual(result.skipped.length, 1);
+	assert.strictEqual(result.skipped[0].reason, "text-mismatch");
+	assert.ok(editor.text().includes("$y$"), "the drifted paragraph keeps its source text");
 });
 
 test("a stale plan is rejected by the text-mismatch guard", () => {
@@ -363,7 +482,7 @@ test("commands resolve the builder api through window.AscBuilder when Api is abs
 		vm.runInContext("(" + commands.readCommand.toString() + ")({})", context)
 	);
 	assert.strictEqual(result.paragraphs.length, 1);
-	assert.strictEqual(result.paragraphs[0].text, "$w$");
+	assert.strictEqual(result.paragraphs[0].text, "$w$\r\n");
 });
 
 test("the menus are withheld while the editor is still booting", async () => {
@@ -402,7 +521,7 @@ test("the context menu root declares a checker so the host offers it", () => {
 	})[0];
 	assert.ok(root, "the context menu root exists");
 	assert.deepStrictEqual(root.showOnOptionsType, ["All"], "the root opts into every context type");
-	assert.strictEqual(root.children.length, 2, "and keeps its two child items");
+	assert.strictEqual(root.children.length, 3, "and keeps its child items");
 	// Clicking the parent row must do something: it runs the document-wide
 	// conversion. A parent with no handler was dead in the real menu.
 	assert.strictEqual(typeof root.onClick, "function", "the root row has a default action");
@@ -426,7 +545,7 @@ test("every context menu item passes the host checker gate on its own", () => {
 			root.items.map(function (item) {
 				return item.text;
 			}),
-			["Convert selection", "Convert whole document"],
+			["Convert selection", "Convert whole document", "Show last report"],
 			contextType + ": and a populated submenu"
 		);
 	});
@@ -497,7 +616,17 @@ test("the plugin initialises, registers menus and converts through the bridge", 
 	assert.strictEqual(report.converted, 2);
 	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["E = mc^2", "a^2+b^2=c^2"]);
 	assert.ok(editor.text().includes("$10 and $20."), editor.text());
-	assert.strictEqual(h.windows.length, 1, "the report window was shown");
+	// Reports are silent by default (SETTINGS_VERSION 2), so a conversion opens
+	// nothing; the numbers are kept and reachable from the menu.
+	assert.strictEqual(h.windows.length, 0, "no report window on a silent conversion");
+	assert.strictEqual(
+		harness.getLastReport().converted,
+		2,
+		"the report is still kept, which is what Show last report shows"
+	);
+
+	harness.openReport();
+	assert.strictEqual(h.windows.length, 1, "Show last report opens the window");
 	assert.ok(
 		decodeURIComponent(h.windows[0].variation.url).includes("Converted: 2 / 2"),
 		decodeURIComponent(h.windows[0].variation.url)
@@ -547,4 +676,154 @@ test("report window can be disabled through settings", async () => {
 	await harness.convert("document");
 	assert.strictEqual(harness.harness.windows.length, 0);
 	assert.strictEqual(editor.maths().length, 1, "conversion still happens");
+});
+
+// ---------------------------------------------------------------------------
+// The report window.
+//
+// Closing it needs `Asc.plugin.button`. The host's injected router
+// (sdkjs/word/sdk-all.js, the plugin_onMessage blob) handles a dialog button like
+// this:
+//
+//     case "button":
+//       Asc.plugin.button || (-1 !== k) || n !== g.buttonWindowId
+//           ? Asc.plugin.button(k, g.buttonWindowId)   // throws when undefined
+//           : Asc.plugin.executeCommand("close", "");
+//
+// The click is posted to the plugin frame, whose id is never the window id, so
+// the first branch is always taken. Without the hook, clicking the header X threw
+// a TypeError inside the handler and the window could not be closed at all.
+// ---------------------------------------------------------------------------
+
+test("the plugin defines Asc.plugin.button, which is what closes a window", () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$x$"] }));
+	harness.init();
+
+	assert.strictEqual(
+		typeof harness.Asc.plugin.button,
+		"function",
+		"without this hook the host's router throws on every dialog button"
+	);
+});
+
+test("the footer Close button and the header X both close the report window", () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$x$"] }));
+	harness.init();
+	harness.openReport();
+
+	const h = harness.harness;
+	assert.strictEqual(h.windows.length, 1, "the report opened");
+	const id = h.windows[0].id;
+
+	// 0 is the footer Close button, -1 is the dialog's header X.
+	harness.pressWindowButton(0, id);
+	assert.deepStrictEqual(h.windowCloses, [id], "the footer Close button closed it");
+
+	harness.openReport();
+	harness.pressWindowButton(-1, harness.harness.windows[1].id);
+	assert.deepStrictEqual(h.windowCloses, [id, "window-1"], "so did the header X");
+});
+
+test("a button for another window is ignored", () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$x$"] }));
+	harness.init();
+	harness.openReport();
+
+	// The editor's own window id, and a stray id, must not close the report.
+	harness.pressWindowButton(-1, "editor_1");
+	harness.pressWindowButton(0, "");
+	assert.deepStrictEqual(harness.harness.windowCloses, [], "nothing was closed");
+});
+
+test("the report window advertises a Close button to the host", () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$x$"] }));
+	harness.init();
+	harness.openReport();
+
+	const variation = harness.harness.windows[0].variation;
+	// An empty `buttons` array is what the host reads as "no footer", which left
+	// the header X as the only way out - and that one was broken.
+	assert.ok(Array.isArray(variation.buttons) && variation.buttons.length === 1, "one footer button");
+	assert.strictEqual(variation.buttons[0].text, "Close");
+	assert.strictEqual(variation.buttons[0].primary, true);
+	assert.ok(variation.isVisual, "it is a visual window");
+	assert.strictEqual(variation.isModal, false);
+	assert.ok(!("isViewer" in variation), "isViewer is an API-plugin flag, not a window one");
+});
+
+test("a second report is a fresh window, not the stale first one", () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$x$"] }));
+	harness.init();
+
+	harness.openReport();
+	const first = harness.harness.windows[0].id;
+	harness.openReport();
+
+	const h = harness.harness;
+	assert.strictEqual(h.windows.length, 2, "a second window was opened");
+	assert.notStrictEqual(h.windows[1].id, first, "with its own frame id");
+	// The host ignores a repeat frame id, which is why the old code showed the
+	// previous numbers for a second report.
+	assert.deepStrictEqual(h.windowCloses, [first], "and the first one was closed");
+});
+
+test("reports are silent by default, and an explicit request still opens one", async () => {
+	const editor = createEditor({ paragraphs: ["$q$"] });
+	const harness = createHarness(editor);
+	harness.init();
+
+	await harness.convert("document");
+	assert.strictEqual(harness.harness.windows.length, 0, "a conversion shows no window");
+	assert.strictEqual(editor.maths().length, 1, "but it still converts");
+
+	harness.openReport();
+	assert.strictEqual(harness.harness.windows.length, 1, "Show last report opens one anyway");
+});
+
+test("the ribbon has a Report window toggle, and it is off", () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$x$"] }));
+	harness.init();
+
+	const toggle = harness.harness.roots[0].children.filter((item) => /Report window/.test(item.text))[0];
+	assert.ok(toggle, "the toggle exists");
+	assert.ok(/^\u2717/.test(toggle.text), "and starts off: " + toggle.text);
+	assert.match(toggle.icons, /report-off/, "with the eye-off glyph");
+
+	toggle.click();
+	assert.ok(/^\u2713/.test(toggle.text), "clicking turns it on: " + toggle.text);
+	assert.match(toggle.icons, /report-on/, "and switches to the eye glyph");
+	assert.strictEqual(
+		JSON.parse(harness.window.localStorage.getItem("onlyoffice-latex-math.settings")).openReport,
+		true
+	);
+});
+
+test("a settings record from before the silence cannot keep the old behaviour", () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$x$"] }));
+	// What a v1 profile holds: no version, and reports explicitly on.
+	harness.window.localStorage.setItem(
+		"onlyoffice-latex-math.settings",
+		JSON.stringify({ inlineDollar: false, openReport: true })
+	);
+	harness.init();
+
+	const settings = harness.getSettings();
+	assert.strictEqual(settings.openReport, false, "the new default wins");
+	assert.strictEqual(settings.inlineDollar, false, "the owner's delimiter choice is kept");
+});
+
+test("a settings record written after the upgrade is honoured", () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$x$"] }));
+	harness.window.localStorage.setItem(
+		"onlyoffice-latex-math.settings",
+		JSON.stringify({ version: 2, openReport: true })
+	);
+	harness.init();
+	assert.strictEqual(harness.getSettings().openReport, true, "an explicit choice is respected");
+
+	// And the save path stamps the version, so the next load keeps it.
+	harness.harness.roots[0].children.filter((item) => /\$\.\.\.\$/.test(item.text))[0].click();
+	const stored = JSON.parse(harness.window.localStorage.getItem("onlyoffice-latex-math.settings"));
+	assert.strictEqual(stored.version, 2);
+	assert.strictEqual(stored.openReport, true);
 });

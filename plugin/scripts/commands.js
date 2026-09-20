@@ -112,6 +112,10 @@
 		"	var start = null, end = null, text = '';",
 		"	try { start = range.GetStartPos(); end = range.GetEndPos(); text = range.GetText(); } catch (e) { /* keep nulls */ }",
 		"	if (start === null || end === null || typeof text !== 'string') { out.push({ start: null, end: null, text: '' }); continue; }",
+		// `aligned` is diagnostic only, never a gate: a range counts positions
+		// (empty ones render as nothing, the paragraph mark renders as two
+		// characters), so it is false for ordinary prose as well. What actually
+		// guards the write is APPLY_BODY comparing each span's live range text.
 		"	out.push({ start: start, end: end, text: text, aligned: (end - start) === text.length });",
 		"}",
 		"var selection = null;",

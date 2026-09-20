@@ -53,9 +53,15 @@
 		<div id="when"></div>
 		<pre id="lines"></pre>
 		<div id="actions">
-			<button id="copy">Copy</button>
+			<button id="copy" class="btn-text-default">Copy</button>
+			<button id="close" class="btn-text-default submit primary">Close</button>
 		</div>
 	</div>
+	<!-- The SDK publishes windowID from this page's own URL and provides
+	     executeMethod, which is how the page closes itself if the host's own
+	     buttons are unavailable. Never load scripts/code.js here: that would
+	     re-register the plugin's menus from a second frame. -->
+	<script type="text/javascript" src="../v1/plugins.js"></script>
 	<script type="text/javascript" src="scripts/report.js"></script>
 </body>
 </html>

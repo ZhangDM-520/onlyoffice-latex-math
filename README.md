@@ -68,17 +68,73 @@ Verify that the loaded script is the installed one (see `docs/NOTE.md` for the C
 guard, switchable). Malformed spans — unterminated delimiters, whitespace-only bodies, spans across a
 blank line — are **left untouched and reported**, never silently mangled.
 
+The currency guard is deliberately not relaxed, because **nothing downstream will catch a mistake**:
+`CLaTeXParser.prototype.Parse` turns any token it does not recognise into a literal character
+(`word/sdk-all.js`, `GetASTTree2`), and `ApiDocument.AddMathEquation` returns `true` unconditionally
+once the math element has been inserted. A wrong span is therefore deleted prose replaced by garbage
+math, with no error and no rollback. Being conservative at the delimiter is the only protection there
+is.
+
+### How detection decides
+
+Detection is deliberately biased towards *not* discarding anything:
+
+1. **Every paragraph is scanned.** An earlier version dropped paragraphs whose range length did not
+   equal their text length, on the theory that such offsets cannot be trusted. Measured on
+   onlyoffice-git 9.4.0.130 that comparison is false for *every* paragraph — a range counts positions
+   (interior ones can render as empty text) while `GetText()` returns characters **plus** the trailing
+   paragraph mark as CRLF (2 characters for 1 position). Ordinary prose failed it, so a document
+   holding `$$x=1$$` reported "Scanned: 0 paragraphs". Only a paragraph that cannot be read at all
+   (`GetStartPos`/`GetRange` failing) is now set aside.
+2. **Each span is verified against the live document before it is rewritten.** Every operation carries
+   the source text it was planned from, and the apply step refuses any span whose range text no longer
+   matches (`text-mismatch`), then checks afterwards that the source really left its own paragraph
+   (`misplaced-after-insert` stops the run). A drifted offset is a reported skip, never a misplaced
+   equation.
+3. Offsets are read from the document snapshot and re-checked at apply time, spans are applied
+   back-to-front so earlier offsets stay valid, and everything lands in one undo step.
+
 ## Report window
 
-Each conversion opens a report with the count, the spans outside the selection, malformed-delimiter
-causes and a re-read of the document proving the delimiters are gone. Set `openReport` to `false` in
-the plugin's `localStorage` entry `onlyoffice-latex-math.settings` for silent conversions. The
-delimiter toggles in the menu write to the same entry.
+Each conversion records a report: the count, the spans outside the selection, malformed-delimiter
+causes, any span refused at apply time, and a re-read of the document proving the delimiters are gone.
+**Reports are silent by default** — open the last one on demand from *Show last report* in the ribbon
+or the context menu, or turn on the *Report window* toggle to get every report as it happens. Either
+way the report can be closed with the dialog's X, its footer *Close* button or `Esc`.
+
+Settings live in the plugin's `localStorage` entry `onlyoffice-latex-math.settings` (delimiter toggles,
+report behaviour). The record carries a version, so a profile written by an older build cannot keep a
+behaviour that has since been silenced.
+
+## Icons
+
+The toolbar and menu glyphs are **Tabler icons**, rendered from the font shipped by
+[noctalia](https://github.com/noctalia-dev/noctalia) rather than drawn by hand:
+
+| Path | What |
+| :--- | :--- |
+| `/usr/share/noctalia/assets/fonts/noctalia-tabler.ttf` | the icon font (`noctalia-tabler-icons`) |
+| `/usr/share/noctalia/assets/fonts/tabler.json` | 6000+ `name → {category, codepoint}` entries |
+| `/usr/share/noctalia/assets/fonts/tabler-icons-license.txt` | **MIT**, © 2020-2025 Paweł Kuna |
+
+The shipped PNGs are self-contained, so installing the plugin does **not** require noctalia — only
+regenerating the icons does:
+
+```bash
+python tools/make-icons.py --list     # the slot -> glyph manifest
+python tools/make-icons.py            # rewrite plugin/resources/** (needs Pillow + the font)
+python tools/make-icons.py --check    # assert every slot exists at every scale, non-blank
+```
+
+The host resolves `…%scale%(default).png` into five keys (`100/125/150/175/200 %`) and picks the one
+nearest the desktop scale, **with no fallback**: if `icon@1.25x.png` is missing the entry renders blank.
+Every slot is therefore written at all five scales, and `tests/icons.test.js` fails the build if one
+goes missing.
 
 ## Tests
 
 ```bash
-node --test tests/          # 60 tests: scanner, harness, integration, report
+node --test tests/          # 85 tests: scanner, icons, harness, integration, report
 ```
 
 `plugin/scripts/scan.js` is the pure core (delimiter rules, offset planning) and is deliberately free
@@ -90,7 +146,9 @@ that talks to the host and runs the editor commands through `Asc.plugin.callComm
 * **Hotkey** — `Ctrl+Alt+M` (whole document) is implemented, but this build only forwards `onKeyDown`
   to plugins while a form/content-control input helper owns the keyboard, so the shortcut is
   effectively inactive. Use the menu. See `docs/NOTE.md`.
-* `LaTeXParser.js` in sdkjs implements a subset of TeX; an unsupported expression is reported rather
-  than half-converted.
+* `LaTeXParser.js` in sdkjs implements a subset of TeX, and it is **lenient**: an expression it does
+  not understand is not rejected, its parts are inserted as literal characters. The delimiter rules
+  are therefore the only thing standing between prose and a mangled equation — see *How detection
+  decides* above.
 * Live conversion *while typing* would require patching sdkjs (`RunAutoCorrect.js`) and rebuilding
   onlyoffice-git — explicitly out of scope.

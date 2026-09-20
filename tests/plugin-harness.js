@@ -49,6 +49,7 @@ function createHarness(editor, options) {
 		roots: [],
 		contextMenus: [],
 		windows: [],
+		windowCloses: [],
 		events: {},
 		executedCommands: [],
 		toolbarUpdates: [],
@@ -64,6 +65,7 @@ function createHarness(editor, options) {
 		self.id = self.name;
 		self.enabled = true;
 		self.onClick = null;
+		self.icons = null;
 		if (parent) {
 			parent.children.push(self);
 		} else {
@@ -138,6 +140,8 @@ function createHarness(editor, options) {
 
 	function PluginWindow() {
 		var self = this;
+		// The real host generates a uuid per PluginWindow instance, so a fresh
+		// instance is what makes a second report a *new* window.
 		this.id = "window-" + harness.windows.length;
 		this.events = {};
 		this.attachEvent = function (name, handler) {
@@ -147,6 +151,10 @@ function createHarness(editor, options) {
 		this.activate = function () {};
 		this.show = function (variation) {
 			harness.windows.push({ id: self.id, variation: variation });
+		};
+		// Mirror of PluginWindow.prototype.close(): executeMethod("CloseWindow").
+		this.close = function () {
+			harness.windowCloses.push(self.id);
 		};
 	}
 
@@ -285,6 +293,22 @@ function createHarness(editor, options) {
 		},
 		convert: function (mode) {
 			return windowStub.OnlyOfficeLatexMathApi.convert(mode);
+		},
+		// `Asc.plugin.button(id, windowId)` is what the host's injected router
+		// calls for the dialog's header X (-1) and for every footer button. The
+		// plugin must define it or the router throws and the window never closes.
+		pressWindowButton: function (id, windowId) {
+			return Asc.plugin.button(id, windowId);
+		},
+		openReport: function () {
+			windowStub.OnlyOfficeLatexMathApi.showLastReport();
+			return harness;
+		},
+		getLastReport: function () {
+			return windowStub.OnlyOfficeLatexMathApi.getLastReport();
+		},
+		getSettings: function () {
+			return windowStub.OnlyOfficeLatexMathApi.getSettings();
 		},
 		findToolbarItem: function (text) {
 			var root = harness.roots[0];
