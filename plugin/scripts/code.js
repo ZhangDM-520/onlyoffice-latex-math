@@ -31,12 +31,14 @@
 	// editor shell is up before publishing the menus anyway.
 	var PUBLISH_BACKSTOP_MS = 1500;
 
+	// Everything here is reachable from the ribbon tab; a stored key with no UI
+	// would be a setting nothing can change, so `currencyGuard` is a constant in
+	// `scannerOptions` instead.
 	var DEFAULT_SETTINGS = {
 		inlineDollar: true,
 		displayDollar: true,
 		inlineParen: true,
 		displayBracket: true,
-		currencyGuard: true,
 		openReport: false
 	};
 
@@ -110,7 +112,7 @@
 		}
 	}
 
-	function scannerOptions(forceDisplay) {
+	function scannerOptions() {
 		return {
 			delimiters: {
 				inlineDollar: settings.inlineDollar,
@@ -118,8 +120,8 @@
 				inlineParen: settings.inlineParen,
 				displayBracket: settings.displayBracket
 			},
-			currencyGuard: settings.currencyGuard,
-			forceDisplay: !!forceDisplay
+			// Not a toggle, and not a stored key: see DEFAULT_SETTINGS above.
+			currencyGuard: true
 		};
 	}
 
@@ -273,7 +275,12 @@
 		reportWindow = null;
 	}
 
-	// The single entry point behind the ribbon item and the context-menu item.
+	/**
+	 * Open the last report, whatever the *Report window* toggle says.
+	 *
+	 * Reports are silent by default, so this is the only way back to one. The
+	 * window itself is the plugin's, so nothing here touches the document.
+	 */
 	function showLastReport() {
 		if (!lastReport) {
 			var empty = makeReport(tr("Show last report"));
@@ -288,19 +295,20 @@
 	 * Conversion
 	 * ------------------------------------------------------------------ */
 
-	function collectParagraphs(snapshot) {
-		return core.collectParagraphs(snapshot);
-	}
-
-	function convert(mode) {
-		var title =
-			mode === "document"
-				? tr("Convert document")
-				: mode === "selection-display"
-				? tr("Convert selection as display math")
-				: tr("Convert selection");
-
-		var report = makeReport(title);
+	/**
+	 * The plugin's **only** conversion.
+	 *
+	 * The selection is the unit of work by design: the owner chooses what to
+	 * convert and the plugin never decides for them. "The whole document" is
+	 * `Ctrl+A` followed by this same action, which keeps one code path (and one
+	 * undo step) behind every conversion instead of two with different scopes.
+	 *
+	 * Resolves with the report it produced, on every path - a refused conversion
+	 * is a report too, and callers (and the dev console) should not have to ask
+	 * the module whether it kept one.
+	 */
+	function convertSelection() {
+		var report = makeReport(tr("Convert selection"));
 
 		if (enabledDelimiterCount() === 0) {
 			reportLine(report, tr("No delimiters are enabled. Turn one on in the plugin menu."));
@@ -316,28 +324,22 @@
 						tr("Cannot read the document") + ": " + ((snapshot && snapshot.error) || "no response from editor")
 					);
 					showReport(report);
-					return null;
+					return report;
 				}
 
-				var collected = collectParagraphs(snapshot);
-				var filter = null;
-				if (mode !== "document") {
-					// The editor always reports a selection: an empty one where the
-					// caret happens to sit when nothing is highlighted. Only a real
-					// (non-collapsed) selection may scope the conversion.
-					if (!snapshot.selection || snapshot.selection.start === snapshot.selection.end) {
-						reportLine(report, tr("Select the text to convert first."));
-						showReport(report);
-						return null;
-					}
-					filter = snapshot.selection;
+				// The editor always reports a selection: an empty one where the
+				// caret happens to sit when nothing is highlighted. Only a real
+				// (non-collapsed) selection may scope the conversion - a collapsed
+				// caret is a no-op, never a whole-document surprise.
+				var selection = snapshot.selection;
+				if (!selection || selection.start === selection.end) {
+					reportLine(report, tr("Select the text to convert first."));
+					showReport(report);
+					return report;
 				}
 
-				var plan = core.planReplacements(
-					collected.paragraphs,
-					scannerOptions(mode === "selection-display"),
-					filter
-				);
+				var collected = core.collectParagraphs(snapshot);
+				var plan = core.planReplacements(collected.paragraphs, scannerOptions(), selection);
 
 				reportLine(
 					report,
@@ -379,7 +381,7 @@
 				if (!plan.operations.length) {
 					reportLine(report, tr("Nothing to convert."));
 					showReport(report);
-					return null;
+					return report;
 				}
 
 				return callEditorCommand(commands.applyCommand, {
@@ -392,7 +394,7 @@
 							tr("Conversion failed") + ": " + ((result && result.error) || "no response from editor")
 						);
 						showReport(report);
-						return null;
+						return report;
 					}
 
 					var applied = result.applied || [];
@@ -431,7 +433,7 @@
 						);
 					});
 
-					return verify(report, collected.paragraphs, mode, filter).then(function () {
+					return verify(report, selection).then(function () {
 						showReport(report);
 						return report;
 					});
@@ -440,14 +442,14 @@
 	}
 
 	/** Re-read the document to prove the delimiters are gone. */
-	function verify(report, paragraphs, mode, filter) {
+	function verify(report, filter) {
 		return readDocument().then(function (snapshot) {
 			if (!snapshot || snapshot.error) {
 				reportLine(report, tr("Verification unavailable") + ": " + ((snapshot && snapshot.error) || "no response"));
 				return;
 			}
-			var collected = collectParagraphs(snapshot);
-			var plan = core.planReplacements(collected.paragraphs, scannerOptions(mode === "selection-display"), filter);
+			var collected = core.collectParagraphs(snapshot);
+			var plan = core.planReplacements(collected.paragraphs, scannerOptions(), filter);
 			reportLine(report, tr("Delimiters still present") + ": " + plan.operations.length);
 			if (plan.operations.length === 0 && report.converted > 0) {
 				reportLine(report, tr("All converted spans became native math objects."));
@@ -482,54 +484,43 @@
 		// `iconName` is a slot from the generator's manifest; without one the host
 		// renders the item with no icon at all, which is what every ribbon button
 		// did before.
-		function addItem(text, handler, iconName) {
+		function addItem(text, handler, iconName, separator) {
 			var item = new window.Asc.ButtonToolbar(menuRoot);
 			item.text = text;
 			if (iconName) {
 				item.icons = themedIcon(iconName, true);
+			}
+			if (separator) {
+				item.separator = true;
 			}
 			item.attachOnClick(handler);
 			menuItems.push(item);
 			return item;
 		}
 
-		addItem(
-			tr("Convert document"),
-			function () {
-				convert("document");
-			},
-			"document"
-		);
-
-		addItem(
-			tr("Convert selection"),
-			function () {
-				convert("selection");
-			},
-			"selection"
-		);
-
-		addItem(
-			tr("Convert selection as display math"),
-			function () {
-				convert("selection-display");
-			},
-			"display"
-		);
-
+		// The ribbon tab is a **settings surface, not a menu of actions**. There is
+		// no conversion item by design: conversion acts on the selection and the
+		// owner decides what that is, so it is triggered where the selection is
+		// made - the document right-click row, or the Alt+L chord.
 		reportMenuItem = addItem(tr("Show last report"), showLastReport, "report");
 		reportMenuItem.updateLabel = function () {
 			reportMenuItem.text = tr("Show last report");
 		};
 
-		// Delimiter toggles live at the bottom of the menu. Each item carries its
-		// own label refresh, so nothing has to know their positions in the list.
-		DELIMITER_TOGGLES.forEach(function (toggle) {
-			var item = addItem(delimiterLabel(toggle), function () {
-				settings[toggle.key] = !settings[toggle.key];
-				saveSettings();
-				updateMenuLabels();
-			}, toggle.icon);
+		// The toggles live under a separator, away from the report entry. Each item
+		// carries its own label refresh, so nothing has to know their positions in
+		// the list.
+		DELIMITER_TOGGLES.forEach(function (toggle, index) {
+			var item = addItem(
+				delimiterLabel(toggle),
+				function () {
+					settings[toggle.key] = !settings[toggle.key];
+					saveSettings();
+					updateMenuLabels();
+				},
+				toggle.icon,
+				index === 0
+			);
 			item.updateLabel = function () {
 				item.text = delimiterLabel(toggle);
 			};
@@ -607,24 +598,16 @@
 			}
 			item.addCheckers("All");
 			// A clickable row in the host menu: without a handler a click on
-			// "LaTeX math" itself did nothing. The root doubles as the default
-			// action, the children stay available for the scoped variants.
+			// "LaTeX math" itself did nothing.
 			item.attachOnClick(action);
 			return item;
 		}
 
-		var root = menuItem(null, "LaTeX math", "latex", function () {
-			convert("document");
-		});
-		menuItem(root, "Convert selection", "selection", function () {
-			convert("selection");
-		});
-		menuItem(root, "Convert whole document", "document", function () {
-			convert("document");
-		});
-		// Reports are silent by default now, so the last one has to be reachable
-		// from where the conversion was started.
-		menuItem(root, "Show last report", "report", showLastReport);
+		// One row, and it converts - immediately. The submenu it used to carry only
+		// existed to offer scopes the plugin no longer has, and a row that opens a
+		// menu makes the owner answer a second question before the obvious one (what
+		// is selected) has any effect.
+		var root = menuItem(null, "LaTeX math", "latex", convertSelection);
 
 		window.OnlyOfficeLatexMathContextMenu = root;
 	}
@@ -660,7 +643,7 @@
 	//
 	// Do not "simplify" this back to a `keyCode === 76` or `event.altKey` test.
 	var HOTKEYS = [
-		{ code: "KeyL", key: "l", mods: ["Alt"], action: "selection" }
+		{ code: "KeyL", key: "l", mods: ["Alt"] }
 	];
 	// A modifier keyup the plugin never saw must not leave a chord armed forever.
 	// A real chord is pressed within this window of its modifier.
@@ -705,8 +688,8 @@
 	}
 
 	/**
-	 * Turns the raw key stream into an action name, or `null` when the key is not
-	 * ours.
+	 * Turns the raw key stream into the binding it completes, or `null` when the
+	 * key is not ours.
 	 *
 	 * Everything it knows comes from the events handed to it plus the `now` the
 	 * caller passes, so the whole rule set - including the timing - is testable
@@ -754,7 +737,7 @@
 					continue;
 				}
 				if (sameModifierSet(mods, binding.mods)) {
-					return binding.action;
+					return binding;
 				}
 			}
 			return null;
@@ -777,17 +760,17 @@
 				if (!mods) {
 					mods = armedSet(now) || [];
 				}
-				var action = null;
+				var matched = null;
 				if (!event.repeat && !altGraphHeld(event)) {
 					// Auto-repeat must not convert over and over; `AltGr` shows up
 					// as Control+Alt on layouts that type with it.
-					action = match(event, mods);
+					matched = match(event, mods);
 				}
 				// Any other key consumes the chord state: a chord belongs to the
 				// key that completed it.
 				pressed = {};
 				lastModifierAt = null;
-				return action;
+				return matched;
 			},
 			keyup: function (event) {
 				var name = event ? modifierName(event) : null;
@@ -799,6 +782,8 @@
 					lastModifierAt = null;
 				}
 			},
+			// Inspection helpers: `reset` lets a test (or the dev console) start
+			// from a clean state, `armed` reports the modifiers currently held.
 			reset: function () {
 				pressed = {};
 				lastModifierAt = null;
@@ -809,9 +794,13 @@
 		};
 	}
 
-	var hotkeyStatus = { attached: 0, blocked: 0, chords: HOTKEYS.map(function (binding) {
-		return binding.mods.join("+") + "+" + binding.key.toUpperCase();
-	}) };
+	var hotkeyStatus = {
+		attached: 0,
+		blocked: 0,
+		chords: HOTKEYS.map(function (binding) {
+			return binding.mods.join("+") + "+" + binding.key.toUpperCase();
+		})
+	};
 	var hotkeyMarker = "onlyOfficeLatexMathHotkey" + (window.Asc.plugin.guid || "");
 
 	function nowMs() {
@@ -826,14 +815,14 @@
 			return; // idempotent: a re-init must not double-fire
 		}
 		function onKeyDown(event) {
-			var action = null;
+			var binding = null;
 			try {
-				action = matcher.keydown(event, nowMs());
+				binding = matcher.keydown(event, nowMs());
 			} catch (e) {
 				console.error("[latex-math] hotkey matcher failed", e);
 				return;
 			}
-			if (!action) {
+			if (!binding) {
 				return;
 			}
 			// Claim the key before the editor turns it into text (measured: an
@@ -845,7 +834,7 @@
 			if (typeof event.preventDefault === "function") {
 				event.preventDefault();
 			}
-			convert(action);
+			convertSelection();
 		}
 		function onKeyUp(event) {
 			matcher.keyup(event);
@@ -906,6 +895,13 @@
 				"[latex-math] " + hotkeyStatus.chords.join(", ") + " attached to " + hotkeyStatus.attached + " document(s)"
 			);
 		}
+		// A partial attach is not a failure, but it is not a success either: name
+		// the frames that refused, or the count above hides them.
+		if (hotkeyStatus.blocked > 0) {
+			console.error(
+				"[latex-math] " + hotkeyStatus.blocked + " frame(s) refused the hotkey listener (opaque origin?)"
+			);
+		}
 	}
 
 	function register() {
@@ -927,6 +923,11 @@
 		// rather than kept as advertisement. `attachHotkeys` is the channel that
 		// actually works.
 		attachHotkeys();
+
+		// Armed here rather than in `init`: a host that never calls `init` (the
+		// `onThemeChanged`-only path below) otherwise had no backstop at all and
+		// never published its menus.
+		armPublishBackstop();
 	}
 
 	/**
@@ -999,7 +1000,6 @@
 		settings = loadSettings();
 		register();
 		markEditorReady("init");
-		armPublishBackstop();
 		probeEditor();
 	};
 
@@ -1010,7 +1010,10 @@
 	};
 
 	// Some hosts call onExternalPluginMessage/onThemeChanged only; make sure the
-	// plugin still initialises when init is skipped.
+	// plugin still initialises when init is skipped. The signal is a *host* signal
+	// (`markEditorReady`'s two halves are `init|theme` and
+	// `translate|roundtrip|interaction`), so a theme-only host still waits for the
+	// backstop - which is what the backstop is for.
 	window.Asc.plugin.onThemeChanged = function (theme) {
 		if (!prepared) {
 			settings = loadSettings();
@@ -1056,7 +1059,7 @@
 
 	// Exposed for manual testing from the plugin dev console.
 	window.OnlyOfficeLatexMathApi = {
-		convert: convert,
+		convertSelection: convertSelection,
 		readDocument: readDocument,
 		showLastReport: showLastReport,
 		closeReportWindow: closeReportWindow,

@@ -81,6 +81,26 @@ function createHarness(editor, options) {
 		}
 		return undefined;
 	};
+	// Mirrors the shipped `toItem` (`pluginBase.js`) in the one respect this
+	// plugin depends on: `items` is emitted **only** when the node has children
+	// (`this.menu && (a.items = ...)`). A childless item is therefore a plain row
+	// or button to the host rather than a menu - which is what makes both the
+	// single-row right-click entry and the flat ribbon tab possible.
+	Matcher.prototype.toItem = function () {
+		var item = { id: this.id, text: this.text, disabled: false };
+		if (this.icons) {
+			item.icons = this.icons;
+		}
+		if (this.separator) {
+			item.separator = true;
+		}
+		if (this.children.length) {
+			item.items = this.children.map(function (child) {
+				return child.toItem();
+			});
+		}
+		return item;
+	};
 	// Mirrors Asc.ButtonContextMenu / ButtonToolbar in the shipped v1/plugins.js:
 	// `showOnOptionsType` starts empty and the host only offers the item when the
 	// live context type matches a checker (or a checker is the literal "All").
@@ -105,6 +125,12 @@ function createHarness(editor, options) {
 	}
 	ButtonToolbarItem.prototype = Object.create(Matcher.prototype);
 	ButtonToolbarItem.prototype.constructor = ButtonToolbarItem;
+	// `r.prototype.toItem` stamps the item type on top of the shared projection.
+	ButtonToolbarItem.prototype.toItem = function () {
+		var item = Matcher.prototype.toItem.call(this);
+		item.type = "button";
+		return item;
+	};
 
 	// Reproduces `ButtonContextMenu.prototype.onContextMenuShow` from the shipped
 	// v1/plugins.js, including the detail that made the live menu dead: the host
@@ -121,12 +147,17 @@ function createHarness(editor, options) {
 			return false;
 		}
 		function build(item) {
-			var composed = { id: item.id, text: item.text, items: [] };
-			item.children.forEach(function (child) {
-				if (composes(child)) {
-					composed.items.push(build(child));
-				}
-			});
+			// `items` is omitted when the node has no children: that is what the
+			// host turns into a plain, immediately-clickable row (see toItem above).
+			var composed = { id: item.id, text: item.text };
+			if (item.children.length) {
+				composed.items = [];
+				item.children.forEach(function (child) {
+					if (composes(child)) {
+						composed.items.push(build(child));
+					}
+				});
+			}
 			return composed;
 		}
 		var items = [];
@@ -136,6 +167,27 @@ function createHarness(editor, options) {
 			}
 		});
 		return { items: items };
+	};
+
+	// Reproduces `r.prototype.toToolbar` from the shipped v1/plugins.js: a root with
+	// `parent === null` becomes the **tab** and its own `toItem()` is never emitted,
+	// so every ribbon button is a child of the root. That is why a plugin cannot
+	// make the tab itself an action.
+	harness.composeToolbar = function () {
+		var tabs = [];
+		harness.roots.forEach(function (root) {
+			if (root.itemType !== "toolbar" || root.parent !== null) {
+				return;
+			}
+			tabs.push({
+				id: root.id,
+				text: root.text,
+				items: root.children.map(function (child) {
+					return child.toItem();
+				})
+			});
+		});
+		return { tabs: tabs };
 	};
 
 	function PluginWindow() {
@@ -299,6 +351,16 @@ function createHarness(editor, options) {
 			}
 		});
 	}
+	// The other opaque-origin shape, and the one the shipped AI plugin hits: the
+	// frame is reachable but its `document` throws, so the walk counts a refusal
+	// and continues to the next ancestor.
+	if (options.parentDocumentThrows) {
+		Object.defineProperty(editorFrame, "document", {
+			get: function () {
+				throw new Error("SecurityError: Blocked a frame with origin onlyoffice://plugin");
+			}
+		});
+	}
 
 	// Delivers a key event the way the host does: a capture-phase listener on the
 	// *editor* document sees it first (that document owns the hidden TEXTAREA the SDK
@@ -390,8 +452,12 @@ function createHarness(editor, options) {
 			Asc.plugin.onTranslate();
 			return harness;
 		},
-		convert: function (mode) {
-			return windowStub.OnlyOfficeLatexMathApi.convert(mode);
+		// There is one conversion and it always acts on the selection.
+		convertSelection: function () {
+			return windowStub.OnlyOfficeLatexMathApi.convertSelection();
+		},
+		composeToolbar: function () {
+			return harness.composeToolbar();
 		},
 		// The hotkey surface. `pressAltChord` replays the *real* sequence measured in
 		// plan section 2.3: the modifier keydown, then the bound key with every

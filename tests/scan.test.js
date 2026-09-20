@@ -135,12 +135,58 @@ test("disabled delimiters are ignored", () => {
 	);
 });
 
-test("forceDisplay upgrades every span to display math", () => {
-	const result = findMathSpans("a $x$ and $$y$$", { forceDisplay: true });
+// The blank-line rule is stated in the README ("spans across a blank line are
+// left untouched"), so it is enforced rather than merely claimed: a display span
+// may wrap a soft line break, never an empty line.
+test("a display span survives a soft line break but not a blank line", () => {
+	assert.deepStrictEqual(latexOf(findMathSpans("$$\na + b\n$$")), ["a + b"]);
+
+	const blank = findMathSpans("$$a\n\nb$$");
+	assert.deepStrictEqual(blank.spans, []);
+	assert.strictEqual(blank.warnings[0].code, "unterminated-display-dollar");
+});
+
+test("\\(...\\) is inline, so it never spans a line either", () => {
+	const result = findMathSpans("left \\(x +\ny\\) right");
+	assert.deepStrictEqual(result.spans, []);
+	assert.strictEqual(result.warnings[0].code, "unterminated-inline-paren");
+});
+
+// An empty body is a malformed span on *every* delimiter; reporting it on only
+// one of the four left three silent no-ops in the document.
+test("an empty body is reported on every delimiter", () => {
+	assert.ok(findMathSpans("$$$$").warnings.some((w) => w.code === "empty-span"));
 	assert.deepStrictEqual(
-		result.spans.map((span) => span.display),
-		[true, true]
+		findMathSpans("\\(\\)").warnings.map((w) => w.code),
+		["empty-span"]
 	);
+	assert.deepStrictEqual(
+		findMathSpans("\\[\\]").warnings.map((w) => w.code),
+		["empty-span"]
+	);
+	// And on the inline path: with `$$` switched off the second dollar opens an
+	// inline span whose first closer is the one it is sitting on.
+	const inline = findMathSpans("$$x$", { delimiters: { displayDollar: false } });
+	assert.strictEqual(inline.warnings[0].code, "empty-span");
+	assert.deepStrictEqual(latexOf(inline), ["x"]);
+});
+
+// Guards for the decisions in `docs/NOTE.md`: the currency guard is deliberately
+// *not* relaxed, and a rejected closer must not poison the rest of the line.
+test("a currency run cannot drag a later real span into math", () => {
+	assert.deepStrictEqual(latexOf(findMathSpans("Costs $5 and $6 plus $x$ here.")), ["x"]);
+});
+
+test("a whitespace-preceded closer abandons its opener without poisoning the line", () => {
+	assert.deepStrictEqual(latexOf(findMathSpans("The price $x + y $ and $z$ here.")), ["z"]);
+});
+
+// The shape a real paragraph arrives in: a leading space and a trailing CRLF
+// paragraph mark (see the `$$x=1$$` incident in docs/NOTE.md).
+test("a paragraph's trailing CRLF does not hide its display span", () => {
+	const result = findMathSpans(" $$x=1$$\r\n");
+	assert.deepStrictEqual(latexOf(result), ["x=1"]);
+	assert.strictEqual(result.spans[0].display, true);
 });
 
 test("currencyGuard can be turned off", () => {
@@ -238,7 +284,7 @@ test("collectParagraphs keeps a paragraph whose length comparison fails", () => 
 		paragraphs: [
 			// Measured on onlyoffice-git 9.4.0.130: 8 content characters, 11
 			// positions, and the mark in the text.
-			{ start: 24, end: 35, text: " $$x=1$$\r\n", aligned: false }
+			{ start: 24, end: 35, text: " $$x=1$$\r\n" }
 		]
 	};
 	const collected = collectParagraphs(snapshot);
@@ -248,7 +294,7 @@ test("collectParagraphs keeps a paragraph whose length comparison fails", () => 
 
 test("collectParagraphs still reports a paragraph that cannot be read", () => {
 	const snapshot = {
-		paragraphs: [{ start: null, end: null, text: "", aligned: false }, { start: 5, text: "$a$" }]
+		paragraphs: [{ start: null, end: null, text: "" }, { start: 5, text: "$a$" }]
 	};
 	const collected = collectParagraphs(snapshot);
 	assert.strictEqual(collected.unusable, 1);
@@ -256,7 +302,7 @@ test("collectParagraphs still reports a paragraph that cannot be read", () => {
 });
 
 test("a paragraph with an unprovable offset still yields its spans", () => {
-	const snapshot = { paragraphs: [{ start: 10, end: 40, text: "a $x$ b", aligned: false }] };
+	const snapshot = { paragraphs: [{ start: 10, end: 40, text: "a $x$ b" }] };
 	const collected = collectParagraphs(snapshot);
 	const plan = planReplacements(collected.paragraphs);
 	assert.deepStrictEqual(

@@ -40,7 +40,28 @@ if (this.childs) for (...) this.childs[m].onContextMenuShow(a, g)
 so a parent that passes the gate while its children carry no checker produces an entry that is visible
 and whose submenu is **empty** — a click on it does nothing at all. Every item in the tree
 (`menuItem()` in `buildContextMenu`) declares `"All"`, and each carries its own `attachOnClick`, since
-the host only attaches a click event for items that registered one.
+the host only attaches a click event for items that registered one. Measured again in this phase: an
+item **without** children emits no `items` at all (`n.prototype.toItem`: `this.menu && (a.items = …)`),
+which the host renders as a plain, immediately clickable row — so the right-click entry is now a single
+row, and the recursion above no longer applies to it.
+
+### 1.11 A ribbon button is always a child of the root; the root is the tab
+
+`ButtonToolbar.prototype.toToolbar` (`sdkjs-plugins/pluginBase.js`) branches on the parent:
+
+```js
+if (null === this.parent) { var d = {id: this.id, text: t(this.text), items: []}; a.tabs.push(d) }
+else                      { d = this.toItem(); a.items.push(d) }
+if (this.childs) for (...) this.childs[g].toToolbar(d)
+```
+
+The **root** becomes the tab and its own `toItem()` — and therefore its own `attachOnClick` — is never
+emitted, so a plugin cannot make its ribbon tab an action; every button in it is a child of the root.
+The shipped AI plugin has the same shape (`register.js`: `new Asc.ButtonToolbar()` + children). A child
+with its own `menu` array renders with a dropdown; a child without one is a plain button, and
+`separator` / `enableToggle` / `pressed` are passed through. Consequences for this plugin: the tab is a
+settings surface (report entry + separator + five toggles) and the conversion has no ribbon entry — it
+lives on the right-click row and the `Alt+L` chord, both of which act on the selection.
 
 ### 1.3 Hotkeys: the host event is dead, the editor's document is not
 
@@ -61,7 +82,14 @@ capture-phase `keydown` listener to `parent.document` itself.
 * The enumerated directory is the **braced** one (`{5B4C1A72-…}`); `"$SYS/$G"` with a brace-less `$G`
   creates a stray that is ignored — and leaves the old copy in place, so "my fix changed nothing".
 * `cp -r plugin <dest>` nests `<dest>/plugin/` instead of overwriting.
+* **`cp -a plugin/. <dest>` only ever adds.** It never deletes, so a file this repo has stopped shipping
+  (a retired icon, a renamed script) stays in the installed copy and the app keeps loading it. Measured
+  in this phase: after the icon manifest dropped `document`/`display`, both install roots still held all
+  40 PNGs and `diff -r plugin <dest>` was the only thing that showed it. **`rm -rf` the destination
+  first**, or use `rsync -a --delete plugin/ <dest>/`.
 * Chromium caches the plugin script; clear `data/cache/{Cache,Code Cache}` after installing.
+* The launcher is `/usr/bin/desktopeditors` (or `/usr/bin/onlyoffice-desktopeditors`);
+  `/opt/onlyoffice/desktopeditors/desktopeditors` is **not** a path.
 
 ### 1.5 A plugin window can only be closed through `Asc.plugin.button`
 
@@ -148,6 +176,18 @@ is only `if (!paraMath)`. An expression the converter cannot handle is therefore
 the plugin has already deleted the source text by then: prose becomes garbage math with no error and no
 rollback. This is why `$...$` stays single-line and currency-guarded, and why the "cannot start math"
 character list exists at all.
+
+Guard decisions taken while auditing the four delimiter branches (each one is a test now):
+
+| Rule | Decision |
+| :--- | :--- |
+| A closer preceded by whitespace | **abandons the opener** (`findDollarClose` → `-1`), it does not "keep looking". Keeping looking would turn `Costs $5 and $6 plus $x$ here.` into math spanning from the first `$` to the last — measured. A later, valid span on the same line is still found, because the outer loop re-examines each `$`. |
+| A blank line inside `$$…$$` / `\[…\]` | **rejected**, which is what the README always claimed. The scanner sees one paragraph at a time, so a delimiter separated from its partner by an empty line was never closed. A single soft break stays legal (`"$$\na + b\n$$"`). |
+| `\(…\)` across a line | **rejected**: `\(…\)` is inline by definition, so it is single-line like `$...$`. Its previous `allowNewline: true` was the odd one out. |
+| An empty body | **reported** on all four delimiters. Only the `$$` branch warned, so `\(\)` and `\[\]` were silent no-ops; the inline branch's empty case is reachable too (`$$x$` with the display delimiter switched off). |
+
+`aligned` was removed from the read command in the same pass: it was a per-paragraph comparison nothing
+read, and keeping a field that *looks* like a gate is how §1.7 happened.
 
 ### 1.9 A plugin window's page cannot decide anything at `DOMContentLoaded`
 
@@ -285,16 +325,32 @@ from Node over the CDP websocket. Frame contexts:
 
   Then probe one offset at a time with `doc.GetRange(k, k + 1).GetText()` to see which positions carry
   characters, which are empty and which hold the mark.
+* **Did a menu change actually reach the host?** Ask the host, not the plugin: call the composition
+  entry points and inspect their argument — `Asc.plugin._events.onContextMenuShow({type: 1})` for the
+  right-click tree (an item with **no** `items` key is a plain row; a `{"t":"LaTeX math","n":N}` root
+  means N children passed the checker gate) and `_events.onToolbarMenu`/`AddToolbarMenuItem` for the
+  ribbon, where `items` is the flat list of the tab. The harness mirrors both
+  (`composeContextMenu`/`composeToolbar`), but only the live host proves the wiring.
+* **Icon set drift**: `python3 tools/make-icons.py` regenerates *and* prunes — it deletes anything under
+  `plugin/resources/` that the manifest no longer owns, because `--check` iterates the manifest and can
+  therefore never see a retired slot's leftovers (40 of them, after the ribbon was reduced to settings).
 
 ## 3. Verification log (live, GUI)
 
+Everything below was measured against a live build. Rows marked **(5)** are from the phase that made
+the selection the only unit of conversion, the right-click entry a single row and the ribbon a settings
+tab.
+
 | Check | Result |
 | :--- | :--- |
-| Ribbon tab `LaTeX math` at cold start, no interaction | present; 8 items render |
-| *Convert document* on a 13-`$` fixture | `Converted: 4 / 4`; `$10`, `$20`, `\$5` untouched |
+| **(5)** Right-click tree **as the host composes it** | `Asc.plugin._events.onContextMenuShow({type:1})` → `AddContextMenuItem` with **one** item, `{"id":…,"text":"LaTeX math","lockInViewMode":true,"disabled":false,"icons":…}`. There is **no `items` key**, i.e. a plain clickable row, not a submenu — and it still passes the checker gate |
+| **(5)** Ribbon tab **as the host composes it** | `AddToolbarMenuItem` → one tab, `items` = `Show last report`, `✓ $...$` (with `separator`), `✓ $$...$$`, `✓ \(...\)`, `✓ \[...\]`, `✗ Report window`. No conversion entry exists; the tab is the root, so it cannot carry one anyway (§1.11) |
+| **(5)** Icons actually rendered in the ribbon DOM | six, all at `…/big/*@1.25x.png` (the active display scale): `report`, `inline-dollar`, `display-dollar`, `inline-paren`, `display-bracket`, `report-off`. No `document`/`display` reference survives |
+| **(5)** The single conversion on a two-paragraph fixture | `Scanned: 2 paragraphs, 3 LaTeX spans found (1 display)` → `Converted: 3 / 3`, `Display math requested: 1, display mode applied via: logic-document`, `Delimiters still present: 0` |
+| **(5)** `Ctrl+S` on that run, OOXML inspected | 3 `<m:oMath>` (x=1, y=2, a), 2 `<m:oMathPara>` (the display pair), text runs `Inline ` / ` and display` / `here.` / `A ` / ` B and keep $10 and $20.` — the **only two `$` left in the whole file are the currency pair**, so the guard held through the save. No stray chord letter |
+| Ribbon tab `LaTeX math` at cold start, no interaction | present; items render |
+| *Convert document* on a 13-`$` fixture (entry now retired) | `Converted: 4 / 4`; `$10`, `$20`, `\$5` untouched |
 | Display equation via `$$…$$` | `m:oMathPara` in the saved OOXML |
-| Document right-click → *LaTeX math* → *Convert whole document* | clicked by hand, report window opened, 4/4 |
-| *Convert selection* (first paragraph only) | `2 LaTeX spans found`, `Outside the selection: 2`, 2/2 converted |
 | One undo after a run | all four source paragraphs restored verbatim |
 | Save (`Ctrl+S`) and inspect the `.docx` | 6 `<m:oMath`, 2 `<m:oMathPara`, exactly 3 `$` left (currency + escape) |
 | Reopen the saved file | equations load as native, editable math |
@@ -325,15 +381,19 @@ look: a conversion must not consume neighbouring characters.
 
 ## 4. Test layout
 
-`node --test tests/` → 99 tests.
+`node --test tests/` → 105 tests.
 
 * `scan.test.js` — the delimiter core: escapes, currency guard, `$$` precedence, unterminated spans,
-  blank-line rejects, offset planning, and the paragraph-offset filter (a paragraph whose length
-  comparison fails must still be scanned; only an unreadable one is set aside).
+  the blank-line rule, the guard decisions (a whitespace-preceded closer abandons its opener without
+  poisoning the line; a currency run cannot drag a later real span into math), offset planning, and the
+  paragraph-offset filter (a paragraph whose length comparison fails must still be scanned; only an
+  unreadable one is set aside).
 * `plugin-harness.js` — a fake browser window plus a fake editor; it mirrors the host's *gates*, not
   just the API surface: `callCommand` stays silent while the editor is "booting", `addCheckers`
-  records checkers, and `composeContextMenu(type)` reproduces `onContextMenuShow` including the
-  recursion into children. That last mirror is what would have caught the empty-submenu bug. It also
+  records checkers, `composeContextMenu(type)` reproduces `onContextMenuShow` including the recursion
+  into children, and `composeToolbar()` reproduces `toToolbar` (the root becomes the tab). Both
+  projections mirror the shipped `toItem`, which emits `items` **only** for a node with children — the
+  property that makes a single-row right-click entry and a flat ribbon tab possible at all. It also
   models the frame chain (`parent.document` with capture-phase listener recording) and
   `parentAccessThrows`, and `pressAltChord` replays the real two-event sequence of §1.10.
 * `hotkey.test.js` — the chord: the matcher's rules (exact modifier set, repeat, `AltGr`, staleness,
@@ -342,11 +402,13 @@ look: a conversion must not consume neighbouring characters.
   document, the silent-report setting is respected, the listener attaches once per document, and a
   blocking host degrades instead of throwing).
 * `fake-editor.js` — models the measured read shape of §1.7: a paragraph's **own** range carries its
-  trailing `\r\n` while a sub-range ending at the same offset does not, so `aligned` is false for every
-  paragraph exactly as on the host. A harness too kind here is what let the gate ship.
-* `integration.test.js` — publication timing, backstop, caption refresh, both conversion modes, the
-  owner-reported document (`a=∑▒n_i` + empty paragraph + ` $$x=1$$`), spans refused per offset drift,
-  the report window's close affordances and the silenced-by-default report.
+  trailing `\r\n` while a sub-range ending at the same offset does not, so a range span never equals the
+  text length, exactly as on the host. A harness too kind here is what let the old gate ship.
+* `integration.test.js` — publication timing, backstop, caption refresh, the one conversion (over a
+  selection, or a `selectAll()` helper that stands in for `Ctrl+A`), the owner-reported document
+  (`a=∑▒n_i` + empty paragraph + ` $$x=1$$`), spans refused per offset drift, the single-row
+  right-click entry, the settings-only ribbon, the report window's close affordances and the
+  silenced-by-default report.
 * `icons.test.js` / `png.js` — every icon slot exists at all five scales as a valid, non-blank PNG
   (a minimal PNG decoder, so the check is host-independent).
 * `report.test.js` — the report payload survives the host's URL mangling and corrupted input.

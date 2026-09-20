@@ -69,6 +69,24 @@ function convertAll(editor, options, filter) {
 	return { snapshot, collected, plan, result };
 }
 
+/**
+ * Highlight everything, the way `Ctrl+A` does.
+ *
+ * There is one conversion and it acts on the selection, so "convert the whole
+ * document" is a *selection over the whole document*: a test that wants every
+ * span converted has to say so, exactly as the owner does. The end offset comes
+ * from the snapshot rather than from `editor.text().length` - the two do not
+ * agree (the mark is a position in one and two characters in the other), and the
+ * document's own last position is what the editor would report.
+ */
+function selectAll(editor) {
+	const end = read(editor).paragraphs.reduce(function (max, paragraph) {
+		return paragraph.end === null ? max : Math.max(max, paragraph.end);
+	}, 0);
+	editor.state.selection = { start: 0, end: end };
+	return editor;
+}
+
 test("read command reports paragraphs, offsets and alignment", () => {
 	const editor = createEditor({ paragraphs: ["First $a$", "Second paragraph"] });
 	const snapshot = read(editor);
@@ -80,10 +98,13 @@ test("read command reports paragraphs, offsets and alignment", () => {
 	// Paragraph marks occupy one document offset, so paragraph two does not
 	// start right after the first paragraph's text.
 	assert.strictEqual(snapshot.paragraphs[1].start, "First $a$".length + 1);
-	assert.strictEqual(
-		snapshot.paragraphs[0].aligned,
-		false,
-		"the length comparison is informational: every paragraph fails it"
+	// The range span and the text length never agree (the mark is two characters in
+	// the text and one position in the range), so nothing may compare them - the
+	// snapshot does not even carry the comparison any more.
+	assert.notStrictEqual(
+		snapshot.paragraphs[0].end - snapshot.paragraphs[0].start,
+		snapshot.paragraphs[0].text.length,
+		"the length comparison would fail for ordinary prose too"
 	);
 	// With nothing highlighted the editor still reports a selection, collapsed at
 	// the caret, which is why an empty range must never be used as a filter.
@@ -117,15 +138,19 @@ test("a document where every paragraph fails the length comparison still convert
 	editor.segments()[0].push({ type: "math", latex: "\\sum n_i" });
 
 	const snapshot = read(editor);
+	// Nothing in the snapshot compares offsets with lengths any more - and this is
+	// why: every paragraph here would fail the comparison, the same way ordinary
+	// prose does (the mark is two characters in `text` and one position in the
+	// range).
 	assert.deepStrictEqual(
-		snapshot.paragraphs.map((paragraph) => paragraph.aligned),
-		[false, false, false],
-		"the reported document fails the length comparison everywhere"
+		snapshot.paragraphs.map((paragraph) => paragraph.end - paragraph.start !== paragraph.text.length),
+		[true, true, true],
+		"every reported range is shorter than its own text"
 	);
 
-	const harness = createHarness(editor);
+	const harness = createHarness(selectAll(editor));
 	harness.init();
-	const report = await harness.convert("document");
+	const report = await harness.convertSelection();
 
 	assert.deepStrictEqual(
 		editor.maths().map((math) => math.latex),
@@ -159,7 +184,7 @@ test("a selection over a paragraph whose offsets cannot be proven still converts
 
 	const harness = createHarness(editor);
 	harness.init();
-	const report = await harness.convert("selection");
+	const report = await harness.convertSelection();
 
 	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["\\sum n_i", "x=1"]);
 	assert.ok(
@@ -183,9 +208,9 @@ test("a paragraph that cannot be read is reported, not silently dropped", async 
 		return paragraphs;
 	};
 
-	const harness = createHarness(editor);
+	const harness = createHarness(selectAll(editor));
 	harness.init();
-	const report = await harness.convert("document");
+	const report = await harness.convertSelection();
 
 	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["ok"]);
 	assert.ok(
@@ -363,16 +388,22 @@ test("selection filter converts only the selected spans", () => {
 	assert.ok(editor.text().includes("$a$") && editor.text().includes("$c$"), editor.text());
 });
 
-test("selection can be forced into display math", () => {
-	const editor = createEditor({ paragraphs: ["Inline $x$ here"] });
-	editor.state.selection = { start: 0, end: "Inline $x$ here".length };
+test("display delimiters inside the selection still produce display math", () => {
+	// There is no "convert the selection as display math" action any more: the
+	// delimiters decide, and `$$`/`\[` mean display.
+	const editor = createEditor({ paragraphs: ["Mix $a$ and $$b$$ here"] });
+	selectAll(editor);
 
-	const options = Object.assign({}, PLUGIN_DEFAULTS, { forceDisplay: true });
-	convertAll(editor, options, editor.state.selection);
+	const { result } = convertAll(editor, PLUGIN_DEFAULTS, editor.state.selection);
 
-	assert.strictEqual(editor.maths().length, 1);
-	assert.strictEqual(editor.maths()[0].display, true);
-	assert.strictEqual(editor.state.displayConversions.length, 1);
+	assert.strictEqual(result.applied.length, 2);
+	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["a", "b"]);
+	assert.deepStrictEqual(
+		editor.maths().map((math) => math.display),
+		[false, true],
+		"only the $$ span is switched to display"
+	);
+	assert.deepStrictEqual(editor.state.displayConversions, [{ isInline: false, via: "logic-document" }]);
 });
 
 test("paragraphs with unprovable offsets are attempted and refused per span", () => {
@@ -506,66 +537,76 @@ test("the menus are withheld while the editor is still booting", async () => {
 	assert.ok(harness.harness.roots.length >= 1, "the toolbar root is built at publication");
 });
 
-// Regression: the host only copies a context-menu root into the menu when the
-// live context type matches one of `showOnOptionsType`, or when a checker is
-// "All". With no checker the "LaTeX math" submenu never appeared in the real
-// document right-click menu (9.4.0.130-1).
-test("the context menu root declares a checker so the host offers it", () => {
-	const editor = createEditor({ paragraphs: ["$d$"] });
+// Regression, then contract. The host only copies a context-menu root into the
+// menu when the live context type matches one of `showOnOptionsType`, or when a
+// checker is "All" - with no checker the entry never appeared in the real
+// document right-click menu at all (9.4.0.130-1). It now has to pass that gate
+// *and* be a single row that acts.
+test("the right-click entry is one row that converts the selection", async () => {
+	const editor = createEditor({ paragraphs: ["$a$ and $b$"], selection: { start: 0, end: 3 } });
 	const harness = createHarness(editor);
 	harness.init();
 
 	const root = harness.harness.roots.filter(function (item) {
-		return (
-			item.parent === null &&
-			item.children.some(function (child) {
-				return /Convert whole document/i.test(child.text);
-			})
-		);
+		return item.itemType === "contextMenu" && item.parent === null;
 	})[0];
 	assert.ok(root, "the context menu root exists");
+	assert.strictEqual(root.text, "LaTeX math", "with its caption");
 	assert.deepStrictEqual(root.showOnOptionsType, ["All"], "the root opts into every context type");
-	assert.strictEqual(root.children.length, 3, "and keeps its child items");
-	// Clicking the parent row must do something: it runs the document-wide
-	// conversion. A parent with no handler was dead in the real menu.
-	assert.strictEqual(typeof root.onClick, "function", "the root row has a default action");
+	assert.strictEqual(root.children.length, 0, "no submenu: the row itself is the action");
+	assert.strictEqual(typeof root.onClick, "function", "and it has a handler, or it would be a dead row");
+
+	const report = await root.click();
+
+	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["a"]);
+	assert.ok(editor.text().includes("$b$"), "only the selection is converted: " + editor.text());
+	assert.ok(
+		report.lines.some((line) => line.includes("Converted: 1 / 1")),
+		JSON.stringify(report.lines)
+	);
 });
 
-// The host recurses into `childs` through the same checker gate as the root, so
-// a parent that passes the gate while its children carry no checker produces an
-// EMPTY submenu: the entry is visible, and clicking it does nothing at all.
-// Measured live against 9.4.0.130-1, in the document right-click menu.
-test("every context menu item passes the host checker gate on its own", () => {
-	const editor = createEditor({ paragraphs: ["$d$"] });
-	const harness = createHarness(editor);
+// `items` present-but-empty is what the owner used to get: an entry that opens a
+// submenu. An item with no children emits no `items` at all, which is the shape
+// the host renders as a plain, immediately clickable row.
+test("the composed right-click entry carries no submenu, whatever the context type", () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$d$"] }));
 	harness.init();
 
 	["Selection", "Target", "None"].forEach(function (contextType) {
 		const composed = harness.harness.composeContextMenu(contextType);
+		assert.strictEqual(composed.items.length, 1, contextType + ": exactly one entry");
 		const root = composed.items[0];
-		assert.ok(root, contextType + ": the LaTeX math entry reaches the host menu");
-		assert.strictEqual(root.text, "LaTeX math", contextType + ": with its caption");
-		assert.deepStrictEqual(
-			root.items.map(function (item) {
-				return item.text;
-			}),
-			["Convert selection", "Convert whole document", "Show last report"],
-			contextType + ": and a populated submenu"
-		);
-	});
-
-	// Each item must also carry its own click handler: the host only attaches a
-	// click event for items that registered one.
-	const root = harness.harness.roots.filter(function (item) {
-		return item.itemType === "contextMenu" && item.parent === null;
-	})[0];
-	assert.ok(root, "the context menu root was created");
-	[root].concat(root.children).forEach(function (item) {
-		assert.strictEqual(typeof item.onClick, "function", item.text + " has a click handler");
+		assert.strictEqual(root.text, "LaTeX math");
+		assert.strictEqual("items" in root, false, contextType + ": it is a row, not a submenu");
 	});
 });
 
-test("an editor round-trip publishes the menus even without onTranslate", () => {	const editor = createEditor({ paragraphs: ["$d$"] });
+// The contract at the top of this phase: the plugin respects the owner's
+// discretion. With nothing highlighted there is nothing to convert, and the one
+// conversion must not quietly fall back to the whole document.
+test("the right-click row converts nothing when nothing is selected", async () => {
+	const editor = createEditor({ paragraphs: ["$a$ and $b$"] });
+	const harness = createHarness(editor);
+	harness.init();
+
+	const root = harness.harness.roots.filter(function (item) {
+		return item.itemType === "contextMenu" && item.parent === null;
+	})[0];
+	await root.click();
+	const report = harness.getLastReport();
+
+	assert.strictEqual(editor.maths().length, 0, "nothing was converted");
+	assert.strictEqual(report.converted, 0);
+	assert.ok(editor.text().includes("$a$ and $b$"), editor.text());
+	assert.ok(
+		report.lines.some((line) => line.includes("Select the text to convert first")),
+		JSON.stringify(report.lines)
+	);
+});
+
+test("an editor round-trip publishes the menus even without onTranslate", () => {
+	const editor = createEditor({ paragraphs: ["$d$"] });
 	const harness = createHarness(editor);
 	harness.initOnly();
 
@@ -574,6 +615,24 @@ test("an editor round-trip publishes the menus even without onTranslate", () => 
 	return Promise.resolve().then(() => {
 		assert.strictEqual(harness.harness.toolbarRegistered, true);
 	});
+});
+
+// A host that says `init` and then `onThemeChanged` is the case the readiness
+// pair exists for: `init` and `theme` are both *host* signals, and the editor
+// half needs `onTranslate` (or a round-trip). A theme-only host therefore still
+// waits for the backstop - that is what the backstop is for, and this pins the
+// behaviour rather than leaving it to be rediscovered.
+test("a theme-only host still waits for the backstop", async () => {
+	const harness = createHarness(createEditor({ paragraphs: ["$d$"] }), { editorReady: false });
+	harness.Asc.plugin.onThemeChanged("dark");
+	assert.strictEqual(
+		harness.harness.toolbarRegistered,
+		undefined,
+		"a host signal alone does not mean the editor is answering"
+	);
+
+	await new Promise((resolve) => setTimeout(resolve, 1700));
+	assert.strictEqual(harness.harness.toolbarRegistered, true, "the backstop publishes anyway");
 });
 
 test("a host that never confirms readiness still gets the menus", async () => {
@@ -590,10 +649,10 @@ test("a host that never confirms readiness still gets the menus", async () => {
 test("a menu refresh keeps the ribbon tab caption", async () => {
 	// Regression: updateToolbarMenu was fed `menuRoot.name`, which does not
 	// exist on a ButtonToolbar, blanking the tab caption on every conversion.
-	const editor = createEditor({ paragraphs: ["$c$"] });
+	const editor = selectAll(createEditor({ paragraphs: ["$c$"] }));
 	const harness = createHarness(editor);
 	harness.init();
-	await harness.convert("document");
+	await harness.convertSelection();
 
 	const updates = harness.harness.toolbarUpdates;
 	assert.ok(updates.length >= 1, "a menu refresh was sent");
@@ -605,21 +664,34 @@ test("the plugin initialises, registers menus and converts through the bridge", 
 	const editor = createEditor({
 		paragraphs: ["Energy $E = mc^2$ and $a^2+b^2=c^2$.", "Keep $10 and $20."]
 	});
-	const harness = createHarness(editor);
+	const harness = createHarness(selectAll(editor));
 	harness.init();
 
 	const h = harness.harness;
 	assert.strictEqual(h.toolbarRegistered, true);
 	assert.strictEqual(h.contextMenuRegistered, true);
 	assert.ok(h.roots.length >= 1, "a toolbar root was created");
-	assert.ok(h.roots[0].children.length >= 6, "toolbar root has its menu items");
+	// The ribbon tab is a settings surface now: the report entry and the five
+	// toggles, and nothing that converts (the selection is the unit of work).
+	assert.deepStrictEqual(
+		h.roots[0].children.map((item) => item.text),
+		[
+			"Show last report",
+			"\u2713 $...$",
+			"\u2713 $$...$$",
+			"\u2713 \\(...\\)",
+			"\u2713 \\[...\\]",
+			// Reports are silent by default, so the toggle starts off.
+			"\u2717 Report window"
+		]
+	);
 	// The host's plugin key event is not a shortcut channel in this build; the
 	// DOM listener is, and this is what proves it was installed.
 	assert.strictEqual(h.events.onKeyDown, undefined, "no onKeyDown registration is made");
 	assert.strictEqual(JSON.stringify(harness.getHotkeyStatus().chords), '["Alt+L"]');
 	assert.strictEqual(harness.getHotkeyStatus().attached, 2, "editor frame and its parent");
 
-	const report = await harness.convert("document");
+	const report = await harness.convertSelection();
 
 	assert.strictEqual(report.converted, 2);
 	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["E = mc^2", "a^2+b^2=c^2"]);
@@ -645,7 +717,7 @@ test("the plugin initialises, registers menus and converts through the bridge", 
 // sequence) lives in `tests/hotkey.test.js`, next to the measurement notes.
 
 test("delimiter toggles persist and are honoured", async () => {
-	const editor = createEditor({ paragraphs: ["$x$ and \\(y\\)"] });
+	const editor = selectAll(createEditor({ paragraphs: ["$x$ and \\(y\\)"] }));
 	const harness = createHarness(editor);
 	harness.init();
 
@@ -656,20 +728,20 @@ test("delimiter toggles persist and are honoured", async () => {
 	const stored = JSON.parse(harness.window.localStorage.getItem("onlyoffice-latex-math.settings"));
 	assert.strictEqual(stored.inlineDollar, false);
 
-	await harness.convert("document");
+	await harness.convertSelection();
 	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["y"]);
 	assert.ok(editor.text().includes("$x$"), editor.text());
 });
 
 test("report window can be disabled through settings", async () => {
-	const editor = createEditor({ paragraphs: ["$q$"] });
+	const editor = selectAll(createEditor({ paragraphs: ["$q$"] }));
 	const harness = createHarness(editor);
 	harness.window.localStorage.setItem(
 		"onlyoffice-latex-math.settings",
 		JSON.stringify({ openReport: false })
 	);
 	harness.init();
-	await harness.convert("document");
+	await harness.convertSelection();
 	assert.strictEqual(harness.harness.windows.length, 0);
 	assert.strictEqual(editor.maths().length, 1, "conversion still happens");
 });
@@ -764,11 +836,11 @@ test("a second report is a fresh window, not the stale first one", () => {
 });
 
 test("reports are silent by default, and an explicit request still opens one", async () => {
-	const editor = createEditor({ paragraphs: ["$q$"] });
+	const editor = selectAll(createEditor({ paragraphs: ["$q$"] }));
 	const harness = createHarness(editor);
 	harness.init();
 
-	await harness.convert("document");
+	await harness.convertSelection();
 	assert.strictEqual(harness.harness.windows.length, 0, "a conversion shows no window");
 	assert.strictEqual(editor.maths().length, 1, "but it still converts");
 

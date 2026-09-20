@@ -20,9 +20,9 @@ var PARAGRAPH_MARK_COST = 1;
 
 // The host's ApiParagraph.GetText() renders the trailing paragraph mark as CRLF
 // while the paragraph's range counts that mark as a single position. The range
-// span and the text length therefore never agree, which is why `aligned` is a
-// useless gate (see scan.js collectParagraphs) and why the offset mapping has to
-// be verified per span at apply time. Measured live on onlyoffice-git 9.4.0.130:
+// span and the text length therefore never agree, which is why the offset mapping
+// has to be verified per span at apply time (see scan.js collectParagraphs).
+// Measured live on onlyoffice-git 9.4.0.130:
 // an empty paragraph gave `end - start === 3` with `text === "\r\n"`, and a
 // paragraph holding ` $$x=1$$` gave 11 positions for 8 content characters plus
 // `\r\n`, with two interior positions rendering as empty text.
@@ -42,7 +42,6 @@ function createEditor(options) {
 		currentMath: null,
 		selection: options.selection || null,
 		mathRendersAsPlaceholder: !!options.mathRendersAsPlaceholder,
-		alignedOverride: options.alignedOverride || {},
 		failInsert: options.failInsert || {},
 		// The caret an ApiDocument.AddMathEquation call inserts at. It starts at the
 		// top of the document, which is where the editor leaves it for a command
@@ -102,9 +101,6 @@ function createEditor(options) {
 		var base = 0;
 		for (var i = 0; i < index; i++) {
 			base += paragraphLength(i) + PARAGRAPH_MARK_COST;
-		}
-		if (state.alignedOverride[index] !== undefined) {
-			base += state.alignedOverride[index];
 		}
 		return base;
 	}

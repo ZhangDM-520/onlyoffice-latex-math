@@ -48,6 +48,16 @@ function pressedChord(harness) {
 	return harness.pressAltChord(CHORD.code, CHORD.key);
 }
 
+// The matcher reports *which binding* completed rather than an action name: there
+// is one action, so a name would be a field every caller has to agree on for no
+// benefit. The binding crosses the vm boundary, so compare its shape, not its
+// prototype.
+const CHORD_BINDING = JSON.stringify({ code: "KeyL", key: "l", mods: ["Alt"] });
+
+function bindingOf(result) {
+	return result ? JSON.stringify(result) : null;
+}
+
 // ---------------------------------------------------------------------------
 // The matcher on its own: the rule set, including the parts a DOM test cannot
 // reach (the clock, and sequences a real keyboard cannot produce).
@@ -60,7 +70,7 @@ test("the matcher converts on Alt then L with every modifier flag false", () => 
 
 	let now = 1000;
 	assert.strictEqual(matcher.keydown({ key: "Alt", code: "AltLeft" }, now), null, "a modifier is never claimed");
-	assert.strictEqual(matcher.keydown({ key: "l", code: "KeyL" }, (now += 50)), "selection");
+	assert.strictEqual(bindingOf(matcher.keydown({ key: "l", code: "KeyL" }, (now += 50))), CHORD_BINDING);
 });
 
 test("the matcher uses the reported modifiers when the host sends them", () => {
@@ -69,7 +79,7 @@ test("the matcher uses the reported modifiers when the host sends them", () => {
 	const matcher = harness.createHotkeyMatcher();
 
 	// A host that does not consume the modifier (a browser build, or CDP input).
-	assert.strictEqual(matcher.keydown({ key: "l", code: "KeyL", altKey: true }, 1), "selection");
+	assert.strictEqual(bindingOf(matcher.keydown({ key: "l", code: "KeyL", altKey: true }, 1)), CHORD_BINDING);
 });
 
 test("the matcher ignores a key with no modifier, and clears what was armed", () => {
@@ -313,4 +323,22 @@ test("a host that blocks the parent frame degrades instead of breaking", () => {
 	assert.ok(harness.harness.roots.length >= 1);
 	// And there is no listener to press.
 	assert.strictEqual(harness.pressKey({ key: "l", code: "KeyL" }).stopped, false);
+});
+
+// The partial attach: the nearest frame is reachable but refuses access, so one
+// document gets the listener and the editor's own does not. `attached` alone hid
+// this - only "every frame was unreachable" logged anything.
+test("a frame that refuses access is counted, not silently skipped", () => {
+	const editor = createEditor({ paragraphs: ["$a$"], selection: { start: 0, end: 3 } });
+	const harness = createHarness(editor, { parentDocumentThrows: true });
+
+	harness.init();
+
+	const status = harness.getHotkeyStatus();
+	assert.strictEqual(status.attached, 1, "the reachable ancestor still gets a listener");
+	assert.strictEqual(status.blocked, 1, "and the refusal is counted");
+	// The editor's own document is the one that receives keystrokes, and that is
+	// the one that refused: the chord cannot work here, and saying so is the point.
+	assert.strictEqual(harness.pressKey({ key: "l", code: "KeyL" }).stopped, false);
+	assert.strictEqual(editor.state.insertedMath.length, 0);
 });

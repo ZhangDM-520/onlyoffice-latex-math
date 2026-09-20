@@ -29,14 +29,21 @@ app enumerates is the braced one, and an unbraced copy is a silently ignored str
 G='{5B4C1A72-3D0E-4F58-91A6-2C7E48D0B913}'
 
 # system-wide (survives a fresh user profile; needs root)
+sudo rm -rf "/opt/onlyoffice/desktopeditors/editors/sdkjs-plugins/$G"
 sudo cp -a plugin/. "/opt/onlyoffice/desktopeditors/editors/sdkjs-plugins/$G/"
 
 # or per-user (the desktop app merges both roots by GUID + version)
+rm -rf "$HOME/.local/share/onlyoffice/desktopeditors/sdkjs-plugins/$G"
 cp -a plugin/. "$HOME/.local/share/onlyoffice/desktopeditors/sdkjs-plugins/$G/"
 ```
 
 `cp -a plugin/. <dest>` — *not* `cp -r plugin <dest>`: the latter creates `<dest>/plugin/`, and the
 app then runs the previous copy without telling you.
+
+**Remove the destination first on an upgrade.** `cp -a` only ever *adds*: a file the plugin no longer
+ships (a retired icon, a deleted script) stays behind in the installed copy, so `diff -r plugin <dest>`
+is the only way to see it — and the app happily loads a stale script from the leftovers. `rsync -a
+--delete plugin/ <dest>/` does the same job in one step.
 
 After replacing files, quit the editor and clear its renderer cache, otherwise Chromium may keep
 serving the old script:
@@ -49,19 +56,22 @@ Verify that the loaded script is the installed one (see `docs/NOTE.md` for the C
 
 ## Usage
 
-* **Ribbon**: *Plugins* tab → **LaTeX math** → *Convert document* / *Convert selection* /
-  *Convert selection as display math* / delimiter toggles / *Show last report*.
-* **Right-click** in the body → **LaTeX math** (runs the whole-document conversion) or its submenu
-  entries *Convert selection* / *Convert whole document*.
-* **`Alt+L`** converts the selected text. For the whole document, select everything first
-  (`Ctrl+A`) and press the chord — there is no separate whole-document shortcut.
+* **Right-click** on a selection → **LaTeX math**: a single row, and it converts *now*. There is no
+  submenu — the selection is the unit of work, so the only question left is the one the owner has
+  already answered by highlighting something.
+* **`Alt+L`** does exactly the same thing (`Ctrl+A` first, if you want the whole document).
+* **Ribbon**: *Plugins* tab → **LaTeX math** is a *settings* tab — *Show last report* and the five
+  delimiter/report toggles. It deliberately holds no conversion entry.
 * A conversion is one undo step: a single `Ctrl+Z` restores every source span verbatim.
+
+Nothing converts the whole document behind your back: with a collapsed caret (nothing highlighted) the
+plugin reports *Select the text to convert first.* and touches nothing.
 
 ### Hotkeys
 
 | Chord | Action |
 | :--- | :--- |
-| `Alt+L` | *Convert selection* — the same code path as the menu entry |
+| `Alt+L` | *Convert selection* — the same code path as the right-click row |
 
 The chord only exists in the Writer (`variants[0].EditorsSupport` is `["word"]`). Two things about how
 it is implemented are worth knowing, because both are visible in the editor:
@@ -99,8 +109,10 @@ Two consequences you may notice in use:
 | `\[…\]` | display equation |
 
 `\$` is an escape and never opens or closes a span. `$10`, `$20` and `\$5` stay plain text (currency
-guard, switchable). Malformed spans — unterminated delimiters, whitespace-only bodies, spans across a
-blank line — are **left untouched and reported**, never silently mangled.
+guard, always on). Malformed spans — unterminated delimiters, whitespace-only bodies, spans across a
+blank line — are **left untouched and reported**, never silently mangled. A single `$$…$$` or `\[…\]`
+block may wrap across a soft line break; a blank line ends it, because the scanner sees one paragraph
+at a time and a delimiter separated from its partner that way was never closed.
 
 The currency guard is deliberately not relaxed, because **nothing downstream will catch a mistake**:
 `CLaTeXParser.prototype.Parse` turns any token it does not recognise into a literal character
@@ -133,7 +145,7 @@ Detection is deliberately biased towards *not* discarding anything:
 Each conversion records a report: the count, the spans outside the selection, malformed-delimiter
 causes, any span refused at apply time, and a re-read of the document proving the delimiters are gone.
 **Reports are silent by default** — open the last one on demand from *Show last report* in the ribbon
-or the context menu, or turn on the *Report window* toggle to get every report as it happens. Either
+tab, or turn on the *Report window* toggle to get every report as it happens. Either
 way the report can be closed with the dialog's X, its footer *Close* button or `Esc`.
 
 Settings live in the plugin's `localStorage` entry `onlyoffice-latex-math.settings` (delimiter toggles,
@@ -168,7 +180,7 @@ goes missing.
 ## Tests
 
 ```bash
-node --test tests/          # 99 tests: scanner, icons, hotkeys, harness, integration, report
+node --test tests/          # 105 tests: scanner, icons, hotkeys, harness, integration, report
 ```
 
 `plugin/scripts/scan.js` is the pure core (delimiter rules, offset planning) and is deliberately free

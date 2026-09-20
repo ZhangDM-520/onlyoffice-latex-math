@@ -109,7 +109,7 @@ test("every ribbon item and every context menu item carries an icon", () => {
 
 	assert.ok(toolbar, "the ribbon was registered");
 	assert.ok(toolbar.icons, "the ribbon's own button has an icon");
-	assert.ok(toolbar.children.length >= 8, "the ribbon has its items");
+	assert.strictEqual(toolbar.children.length, 6, "the ribbon tab holds the report entry and the five toggles");
 	toolbar.children.forEach(function (item) {
 		// Every one of them used to be iconless: addItem() was never given a path.
 		assert.ok(item.icons, item.text + " has an icon");
@@ -119,14 +119,12 @@ test("every ribbon item and every context menu item carries an icon", () => {
 
 	assert.ok(contextMenu, "the context menu was registered");
 	assert.ok(contextMenu.icons, "the context menu root has an icon");
-	contextMenu.children.forEach(function (item) {
-		assert.ok(item.icons, item.text + " has an icon");
-	});
+	assert.strictEqual(contextMenu.children.length, 0, "the right-click entry is a single row, not a submenu");
 });
 
 test("every icon resolves at every scale, at the right size, with ink in it", () => {
 	const declared = declaredPaths().paths;
-	assert.ok(declared.length >= 20, "collected the plugin's icon declarations");
+	assert.ok(declared.length >= 8, "collected the plugin's icon declarations");
 
 	const seen = {};
 	declared.forEach(function (entry) {

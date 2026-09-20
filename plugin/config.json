@@ -8,17 +8,17 @@
 		"es": "Matemáticas LaTeX"
 	},
 	"guid": "asc.{5B4C1A72-3D0E-4F58-91A6-2C7E48D0B913}",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"minVersion": "8.2.0",
 	"variations": [
 		{
-			"description": "Convert $...$, $$...$$, \\(...\\) and \\[...\\] LaTeX source text into native math equations.",
+			"description": "Convert the selected $...$, $$...$$, \\(...\\) and \\[...\\] LaTeX source text into native math equations.",
 			"descriptionLocale": {
-				"zh": "把 $...$、$$...$$、\\(...\\)、\\[...\\] 的 LaTeX 源码转换成原生公式对象。",
-				"ru": "Преобразуйте текст LaTeX $...$, $$...$$, \\(...\\), \\[...\\] в собственные формулы.",
-				"fr": "Convertissez le texte LaTeX $...$, $$...$$, \\(...\\), \\[...\\] en équations natives.",
-				"de": "Wandeln Sie LaTeX-Quelltext $...$, $$...$$, \\(...\\), \\[...\\] in native Formeln um.",
-				"es": "Convierta el texto LaTeX $...$, $$...$$, \\(...\\), \\[...\\] en ecuaciones nativas."
+				"zh": "把选中的 $...$、$$...$$、\\(...\\)、\\[...\\] LaTeX 源码转换成原生公式对象。",
+				"ru": "Преобразуйте выделенный текст LaTeX $...$, $$...$$, \\(...\\), \\[...\\] в собственные формулы.",
+				"fr": "Convertissez le texte LaTeX $...$, $$...$$, \\(...\\), \\[...\\] sélectionné en équations natives.",
+				"de": "Wandeln Sie den ausgewählten LaTeX-Quelltext $...$, $$...$$, \\(...\\), \\[...\\] in native Formeln um.",
+				"es": "Convierta el texto LaTeX $...$, $$...$$, \\(...\\), \\[...\\] seleccionado en ecuaciones nativas."
 			},
 			"url": "index.html",
 			"icons": "resources/%theme-type%(light|dark)/icon%scale%(default).png",

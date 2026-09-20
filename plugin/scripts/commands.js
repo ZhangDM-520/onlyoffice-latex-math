@@ -112,11 +112,13 @@
 		"	var start = null, end = null, text = '';",
 		"	try { start = range.GetStartPos(); end = range.GetEndPos(); text = range.GetText(); } catch (e) { /* keep nulls */ }",
 		"	if (start === null || end === null || typeof text !== 'string') { out.push({ start: null, end: null, text: '' }); continue; }",
-		// `aligned` is diagnostic only, never a gate: a range counts positions
-		// (empty ones render as nothing, the paragraph mark renders as two
-		// characters), so it is false for ordinary prose as well. What actually
-		// guards the write is APPLY_BODY comparing each span's live range text.
-		"	out.push({ start: start, end: end, text: text, aligned: (end - start) === text.length });",
+		// Only `start`, `end` and `text` travel back. A range counts positions
+		// (interior ones render as empty text, the paragraph mark renders as two
+		// characters), so a range span never equals the text length and any
+		// comparison between them is meaningless - the write path does not gate on
+		// offsets at all (see scan.js collectParagraphs and APPLY_BODY's
+		// text-mismatch guard).
+		"	out.push({ start: start, end: end, text: text });",
 		"}",
 		"var selection = null;",
 		"try {",

@@ -31,8 +31,6 @@
 		},
 		// A `$` closing delimiter may not be followed by a digit ("$1 and $2").
 		currencyGuard: true,
-		// Force every produced span into display mode (menu action).
-		forceDisplay: false,
 		// Keep the raw content, newlines collapsed into single spaces.
 		collapseNewlines: true
 	};
@@ -41,7 +39,6 @@
 		var merged = {
 			delimiters: {},
 			currencyGuard: DEFAULTS.currencyGuard,
-			forceDisplay: DEFAULTS.forceDisplay,
 			collapseNewlines: DEFAULTS.collapseNewlines
 		};
 		options = options || {};
@@ -53,9 +50,6 @@
 		}
 		if (typeof options.currencyGuard === "boolean") {
 			merged.currencyGuard = options.currencyGuard;
-		}
-		if (typeof options.forceDisplay === "boolean") {
-			merged.forceDisplay = options.forceDisplay;
 		}
 		if (typeof options.collapseNewlines === "boolean") {
 			merged.collapseNewlines = options.collapseNewlines;
@@ -129,13 +123,33 @@
 	/**
 	 * Locate the closing delimiter for a paired-delimiter span (`$$`, `\(`,
 	 * `\[`). Returns the index at which the closing token starts, or -1.
+	 *
+	 * A blank line ends the search, whatever `allowNewline` says: this scanner
+	 * only ever sees **one paragraph at a time**, so a delimiter separated from
+	 * its partner by an empty line was never closed (the README states this as a
+	 * rule, and this is where it is enforced).
 	 */
 	function findPairClose(text, from, closer, allowNewline) {
+		var newlineSeen = false;
 		for (var i = from; i < text.length; i++) {
-			if (!allowNewline && (text.charAt(i) === "\n" || text.charAt(i) === "\r")) {
-				return -1;
+			var ch = text.charAt(i);
+			if (ch === "\n" || ch === "\r") {
+				if (!allowNewline) {
+					return -1; // inline math never spans lines
+				}
+				if (ch === "\n" && text.charAt(i - 1) === "\r") {
+					continue; // CRLF is one break, not two
+				}
+				if (newlineSeen) {
+					return -1; // a blank line
+				}
+				newlineSeen = true;
+				continue;
 			}
-			if (text.charAt(i) !== closer.charAt(0) || isEscaped(text, i)) {
+			if (ch !== " " && ch !== "\t") {
+				newlineSeen = false;
+			}
+			if (ch !== closer.charAt(0) || isEscaped(text, i)) {
 				continue;
 			}
 			if (text.substr(i, closer.length) === closer) {
@@ -155,7 +169,7 @@
 			end: end,
 			raw: text.substring(start, end),
 			latex: latex,
-			display: display || options.forceDisplay,
+			display: display,
 			open: open,
 			close: close
 		});
@@ -165,15 +179,14 @@
 	/**
 	 * @param {string} text
 	 * @param {object} [options] see DEFAULTS
-	 * @returns {{spans: Array, warnings: Array, masked: Array}}
+	 * @returns {{spans: Array, warnings: Array}}
 	 */
 	function findMathSpans(text, options) {
 		var opts = mergeOptions(options);
 		var spans = [];
 		var warnings = [];
-		var masked = [];
 		if (typeof text !== "string" || text === "") {
-			return { spans: spans, warnings: warnings, masked: masked };
+			return { spans: spans, warnings: warnings };
 		}
 
 		var i = 0;
@@ -239,9 +252,14 @@
 				) {
 					handled = true;
 					i = closeInline + 1;
+				} else {
+					// Reachable: with the display delimiter switched off, "$$x$"
+					// offers an empty body to this branch.
+					warnings.push({ code: "empty-span", index: i });
 				}
 			} else if (opts.delimiters.inlineParen && text.substr(i, 2) === "\\(" && !isEscaped(text, i)) {
-				var closeParen = findPairClose(text, i + 2, "\\)", true);
+				// Single line, like `$...$`: `\(...\)` *is* inline math.
+				var closeParen = findPairClose(text, i + 2, "\\)", false);
 				if (closeParen === -1) {
 					warnings.push({ code: "unterminated-inline-paren", index: i });
 				} else if (
@@ -259,6 +277,8 @@
 				) {
 					handled = true;
 					i = closeParen + 2;
+				} else {
+					warnings.push({ code: "empty-span", index: i });
 				}
 			} else if (opts.delimiters.displayBracket && text.substr(i, 2) === "\\[" && !isEscaped(text, i)) {
 				var closeBracket = findPairClose(text, i + 2, "\\]", true);
@@ -279,6 +299,8 @@
 				) {
 					handled = true;
 					i = closeBracket + 2;
+				} else {
+					warnings.push({ code: "empty-span", index: i });
 				}
 			}
 
@@ -286,7 +308,7 @@
 				i++;
 			}
 		}
-		return { spans: spans, warnings: warnings, masked: masked };
+		return { spans: spans, warnings: warnings };
 	}
 
 	/**

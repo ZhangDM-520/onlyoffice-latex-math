@@ -48,6 +48,35 @@
 		return !!(api && typeof api.executeMethod === "function" && api.windowID);
 	}
 
+	/**
+	 * Put the report on the clipboard, and *say so* when that fails.
+	 *
+	 * `navigator.clipboard.writeText` returns a promise, so a refused permission
+	 * used to disappear completely: the button looked like it worked and nothing
+	 * was copied, with no error anywhere to explain it. The API is also absent on
+	 * a page without a secure context, which is why the missing-API case is
+	 * reported rather than ignored.
+	 */
+	function copyText(text) {
+		var clipboard = window.navigator && window.navigator.clipboard;
+		if (!clipboard || typeof clipboard.writeText !== "function") {
+			console.error("[latex-math] no clipboard API on this page; the report was not copied");
+			return false;
+		}
+		try {
+			var written = clipboard.writeText(text);
+			if (written && typeof written.then === "function") {
+				written.then(null, function (error) {
+					console.error("[latex-math] could not copy the report", error);
+				});
+			}
+			return true;
+		} catch (e) {
+			console.error("[latex-math] could not copy the report", e);
+			return false;
+		}
+	}
+
 	function closeSelf() {
 		var api = plugin();
 		if (!api || typeof api.executeMethod !== "function") {
@@ -81,14 +110,7 @@
 		document.getElementById("lines").textContent = textOf(report);
 
 		document.getElementById("copy").addEventListener("click", function () {
-			var text = textOf(report);
-			try {
-				if (window.navigator.clipboard) {
-					window.navigator.clipboard.writeText(text);
-				}
-			} catch (e) {
-				/* clipboard access is optional */
-			}
+			return copyText(textOf(report));
 		});
 
 		var closeButton = document.getElementById("close");
@@ -119,6 +141,7 @@
 	window.OnlyOfficeLatexMathReport = {
 		readReport: readReport,
 		closeSelf: closeSelf,
-		canClose: canClose
+		canClose: canClose,
+		copyText: copyText
 	};
 })(window, document);

@@ -68,6 +68,17 @@ function renderAt(search, options) {
 			windowListeners[name] = fn;
 		}
 	};
+	if (options.clipboard) {
+		window.navigator.clipboard = options.clipboard;
+	}
+	// `report.js` reports clipboard failures rather than swallowing them, so the
+	// sandbox has to offer the console it talks to.
+	const logs = [];
+	const consoleStub = {
+		error: function () {
+			logs.push(Array.prototype.slice.call(arguments).map(String).join(" "));
+		}
+	};
 	// `sdkAfterReady` models the real desktop app: ../v1/plugins.js publishes
 	// Asc.plugin.windowID from an XHR callback, so the API is *not* there when the
 	// page finishes parsing. A check made that early hid the Close button for good,
@@ -87,11 +98,19 @@ function renderAt(search, options) {
 		installSdk(options.windowID);
 	}
 
-	vm.runInNewContext(REPORT_SOURCE, { window: window, document: document });
+	vm.runInNewContext(REPORT_SOURCE, { window: window, document: document, console: consoleStub });
 	assert.ok(onReady, "report.js registered a DOMContentLoaded handler");
 	onReady();
 	elements.window = window;
 	elements.document = documentListeners;
+	elements.errors = logs;
+	elements.click = function (id) {
+		const handlers = elements[id] && elements[id].listeners;
+		if (!handlers || typeof handlers.click !== "function") {
+			return undefined;
+		}
+		return handlers.click();
+	};
 	elements.fireLoad = function () {
 		if (typeof windowListeners.load === "function") {
 			windowListeners.load();
@@ -207,4 +226,46 @@ test("a window with no id offers no dead Close button", () => {
 	assert.strictEqual(elements.close.style.display, "none");
 	elements.document.keydown({ key: "Escape", preventDefault: function () {} });
 	assert.deepStrictEqual(calls(elements), [], "nothing is sent without a window id");
+});
+
+// The Copy button. `writeText` returns a promise and the Clipboard API is absent
+// without a secure context, so both failure modes used to be invisible: the
+// button looked like it worked and nothing was copied.
+test("the Copy button writes the report to the clipboard", () => {
+	const written = [];
+	const elements = renderAt(payloadUrl(""), {
+		clipboard: {
+			writeText: function (text) {
+				written.push(text);
+				return Promise.resolve();
+			}
+		}
+	});
+
+	assert.strictEqual(elements.click("copy"), true);
+	assert.deepStrictEqual(written, [REPORT.lines.join("\n")]);
+	assert.deepStrictEqual(elements.errors, []);
+});
+
+test("a refused clipboard write is reported, not swallowed", async () => {
+	const elements = renderAt(payloadUrl(""), {
+		clipboard: {
+			writeText: function () {
+				return Promise.reject(new Error("denied"));
+			}
+		}
+	});
+
+	elements.click("copy");
+	await Promise.resolve().then(() => {});
+	assert.strictEqual(elements.errors.length, 1, "the rejection reaches the console");
+	assert.match(elements.errors[0], /could not copy the report/);
+});
+
+test("a page without a clipboard API says so instead of pretending", () => {
+	const elements = renderAt(payloadUrl(""));
+
+	assert.strictEqual(elements.click("copy"), false);
+	assert.strictEqual(elements.errors.length, 1);
+	assert.match(elements.errors[0], /no clipboard API/);
 });

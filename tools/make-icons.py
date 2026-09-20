@@ -61,9 +61,7 @@ SUPERSAMPLE = 4
 # One source of truth for every icon in the repo: slot -> Tabler glyph name.
 GLYPHS = {
     "latex": "math-function",
-    "document": "math-symbols",
     "selection": "select",
-    "display": "matrix",
     "report": "report",
     "report-on": "eye",
     "report-off": "eye-off",
@@ -226,6 +224,34 @@ def generate(font_dir, quiet=False):
     return written
 
 
+def owned_paths():
+    """Every path the manifest owns, normalised, for comparison with the disk."""
+    return {os.path.normpath(entry["path"]) for entry in expected_files()}
+
+
+def prune(quiet=False):
+    """Delete icon files the manifest no longer owns.
+
+    Without this the generator only ever *adds*: retiring a slot leaves its 40 PNGs
+    on disk, and `--check` cannot see them because it iterates the manifest. The
+    tree then stops being the manifest, which is how the `document`/`display`
+    leftovers appeared after the ribbon was reduced to settings.
+    """
+    owned = owned_paths()
+    removed = []
+    for root, _dirs, names in os.walk(RESOURCES):
+        for name in names:
+            path = os.path.normpath(os.path.join(root, name))
+            if path not in owned:
+                os.remove(path)
+                removed.append(os.path.relpath(path, ROOT))
+    if not quiet:
+        for rel in sorted(removed):
+            print(f"pruned {rel}")
+        print(f"pruned {len(removed)} file(s) that are not in the manifest")
+    return removed
+
+
 def check(quiet=False):
     """Verify every owned file: present, correct size, visibly non-blank.
 
@@ -292,6 +318,7 @@ def main(argv):
         return check(args.quiet)
 
     generate(find_font_dir(args.font), args.quiet)
+    prune(args.quiet)
     return check(args.quiet)
 
 
