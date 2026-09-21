@@ -417,3 +417,67 @@ look: a conversion must not consume neighbouring characters.
 * `icons.test.js` / `png.js` — every icon slot exists at all five scales as a valid, non-blank PNG
   (a minimal PNG decoder, so the check is host-independent).
 * `report.test.js` — the report payload survives the host's URL mangling and corrupted input.
+
+## 5. Upstream: the same gap, and where it is tracked
+
+Math input is confined to the **equation container** upstream, and that is a product decision rather
+than a missing call: `Insert ▸ Equation` (or `Alt+=`) comes first, and only inside the placeholder do
+Math AutoCorrect and `LaTeX` + `Linear` → `Professional` apply. Cite these instead of re-deriving them
+(all fetched 2026-09-21):
+
+| Source | Quote |
+| :--- | :--- |
+| Help Center, [*Insert equation*](https://helpcenter.onlyoffice.com/docs/userguides/document_editor/InsertEquation.aspx) | "**Note**: currently, equations cannot be entered using the linear format, i.e., `\sqrt(4&x^3)`." |
+| Help Center, [*AutoCorrect features*](https://helpcenter.onlyoffice.com/docs/userguides/document_editor/MathAutoCorrect.aspx) | "**Math AutoCorrect**: *When working with equations*, you can insert a lot of symbols, accents, and mathematical operation signs typing them on the keyboard … then press Spacebar." |
+| Community forum, staff, 2025-11-20 | "Math AutoCorrect options are only available when working with equations (Insert > Equation). **It is not supposed to change anything in main content of the document.**" |
+| Community forum, staff, 2025-07-09 | "Math AutoCorrect only works within equations. **Outside of it (just as text) it will not work.**" |
+
+No upstream item asked for the body-text case, so one was filed:
+
+* **`ONLYOFFICE/DocumentServer#3809`** — *Auto-convert LaTeX in document text (`$...$`, `$$...$$`) into
+  math equations*, filed 2026-09-21 as a `feature_request.yml` issue. It asks for on-demand conversion of
+  the **selection** (whole document = `Ctrl+A` first) plus an optional, off-by-default as-you-type
+  trigger, names the currency guard, and cites this repo as the working reference implementation.
+* Cross-linked from **`ONLYOFFICE/DesktopEditors#2062`** (`issuecomment-5754084806`) — the open macOS
+  LaTeX bug whose reporter asked for inline `$...$` twice; the comment marks the scope boundary.
+
+The corpus, so nobody re-treads it:
+
+| Item | State | Scope | Same as body-text conversion? |
+| :--- | :--- | :--- | :--- |
+| `DocumentServer#2717` *LaTeХ formatig* | open, `feature request`, updated 2026-05-20 | A shortcut (`alt+enter`) to format *the current equation*, instead of Equation Settings. Vendor logged it (internal 67781). | no — in-equation |
+| `DocumentServer#3250` auto-format latex equation writing | closed **duplicate of #2717** | `Enter` should convert linear→professional. | no |
+| `DesktopEditors#2096` shortcut for plain-text ↔ display | closed **duplicate of #2717** | A key for the same Equation Settings switch. | no |
+| `DesktopEditors#2062` LaTeX input on macOS | open, reopened, last activity 2026-08-11 | A macOS render bug. Contains two asides: "Optional: support for inline LaTeX ( `$...$` ) inside text, not only inside equation blocks" and "if is possible to select latex code and click Insert-math formula and there is automatically conversion into math formula in editor". | partial, never triaged as a feature |
+| `DocumentServer#2507` (comment, 2023-12-10) | open, `feature request` | "automatically convert the detection of LaTex syntax or unicodeMath syntax strings **in the entire text** into professional mathematical formulas with just one click". Staff: "please create a separate problem for your issue" — it was never filed (`author:ywcprogramer` → 0 issues). | **the same request, never filed** |
+| `DocumentServer#1709`, `#1623` | closed *completed* / *fixed* | LaTeX and linear input *inside* the equation editor; delivered in 8.0.1. | no |
+| `DocumentServer#3678` *LaTeX conversion* | open, `confirmed-bug` | linear↔professional round-trip bug in Presentations. | no |
+| `DocumentServer#2473`, `#2944`, `#2176`, `#1268`, `#1259`, `#3732`, `#3776`, `#3661`, `#3445`, `#1996`, `#2228`, `#2380`, `#969`; `DesktopEditors#99`, `#874`, `#361`, `#1960` | open/closed | Symbols, layout, numbering, shortcuts — all inside the equation editor. `#1960` is the adjacent *sentiment* (a user wanted `->` → `→` in body text; told it is equations-only). | no |
+| `DesktopEditors#2042`, `DocumentServer#2104` | open / closed | The MathType *plugin*, and MathType files. | no |
+| DocumentServer **Discussions** (all 76 enumerated) | — | Deployment Q&A only; `search type:DISCUSSION` for latex/math/mathml/omml → 0. | no |
+| `onlyoffice.github.io`, `web-apps`, `sdkjs`, `office-js-api`, `DocSpace`, `desktop-sdk` issue search | — | No body-conversion request. | no |
+| Community forum (19 `latex` hits, incl. `#4429` 3965 views, `#3641`, `#20798`, `#13060`, `#8711`) | — | Typesetting bugs, mode confusion, "Text AutoCorrect like Math AutoCorrect", Markdown headings. | no |
+
+Precedent that makes the ask credible, and the two things to reuse if it ever lands:
+
+* The vendor's own macro post — [*Use an ONLYOFFICE macro to convert selected text into a LaTeX
+  equation*](https://community.onlyoffice.com/t/use-an-onlyoffice-macro-to-convert-selected-text-into-a-latex-equation/11333)
+  (2024-10-31) — is the selection-only case of exactly this, via `GetRangeBySelect()` +
+  `AddMathEquation(text, "latex")`. It is ONLYOFFICE documenting our primitive and stopping one step
+  short.
+* The marketplace already accepts *in-flight* work of this shape: `mathpix` (calls `AddMathEquation`),
+  and `lizardtypst` ("real-time Typst rendering", merged 2026-04-18, "inspired by Iguana LaTeX").
+
+Re-running the check (the forum **moved to `community.onlyoffice.com`** — `forum.onlyoffice.com` 301s):
+
+```bash
+gh search issues --owner ONLYOFFICE --limit 25 '<term>'      # issues, all forks/repos
+gh api "search/issues?q=org:ONLYOFFICE+<term>+in:body"       # body text, not just titles
+gh api graphql -f query='{ search(query:"repo:ONLYOFFICE/DocumentServer <term>", type: DISCUSSION, first:20) { discussionCount } }'
+curl -sSL 'https://community.onlyoffice.com/search.json?q=<term>'    # -L matters: 301
+```
+
+**Consequences for this repo.** (a) Nothing here should be filed on `#2717` — that is the *in-equation*
+umbrella. (b) If `#3809` is implemented, the plugin's remaining value is only builds older than the
+release that ships it, so re-check before adding features. (c) Anyone arguing that the behaviour
+"should already work" is answered by the quote table above, not by the user guide alone.

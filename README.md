@@ -20,6 +20,12 @@ ONLYOFFICE does support LaTeX, but only *inside* an equation:
 So `$...$` needs an implementation, and `AddMathEquation` already produces exactly the right object.
 The plugin is the smallest correct shape: no editor rebuild, no patched build.
 
+**Upstream:** this gap is now tracked as
+[ONLYOFFICE/DocumentServer#3809](https://github.com/ONLYOFFICE/DocumentServer/issues/3809) — an
+enhancement proposal filed 2026-09-21 asking for delimiter-aware conversion in body text (on demand for
+the selection, optionally as-you-type). No equivalent request existed when it was filed; the precedent
+and the corpus are in `docs/NOTE.md` §5. Until it lands, this plugin is the way to get the behaviour.
+
 ## Install
 
 The plugin GUID is `{5B4C1A72-3D0E-4F58-91A6-2C7E48D0B913}`. **Keep the braces** — the directory the
