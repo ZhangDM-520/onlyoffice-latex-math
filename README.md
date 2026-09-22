@@ -145,6 +145,13 @@ Detection is deliberately biased towards *not* discarding anything:
    equation.
 3. Offsets are read from the document snapshot and re-checked at apply time, spans are applied
    back-to-front so earlier offsets stay valid, and everything lands in one undo step.
+4. **A `$` is never taken from a real expression to close a stray one.** When the candidate closer
+   could itself open a complete span ahead — it can start math, an even number of `$` remains from it,
+   and it really does close — the *earlier* opener is the one abandoned, and it is reported as guarded
+   rather than converted. Without this, `It costs $5, and the value=$x$ here.` turned
+   `$5, and the value=$` into an equation and left `x$ here.` as prose, silently. `$` in prose is not
+   decidable by one character rule (rejecting digit-opened spans would break `$5$` and `$2 + 3$`),
+   which is also why conversion is scoped to the selection you made.
 
 ## Report window
 
@@ -186,7 +193,7 @@ goes missing.
 ## Tests
 
 ```bash
-node --test tests/          # 117 tests: scanner, icons, hotkeys, harness, integration, report
+node --test tests/          # 120 tests: scanner, icons, hotkeys, harness, integration, report
 ```
 
 `plugin/scripts/scan.js` is the pure core (delimiter rules, offset planning) and is deliberately free

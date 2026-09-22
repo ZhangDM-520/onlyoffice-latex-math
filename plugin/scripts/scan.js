@@ -142,6 +142,66 @@
 	}
 
 	/**
+	 * True when the candidate `closer` should be read as an **opener** in its own
+	 * right, abandoning the span whose closer it currently is.
+	 *
+	 * Without this, an unmatched `$` earlier in the sentence steals the opening
+	 * delimiter of a real expression that follows: `It costs $5, and the
+	 * value=$x$ here.` converted `$5, and the value=$` to math and left `x$ here.`
+	 * as prose, with no warning at all — the closer guards only ever inspected the
+	 * candidate itself, never the `$` being taken from someone else.
+	 *
+	 * All four conditions are required; each one covers a case the others miss:
+	 *
+	 *   (0) the current opener's body is non-empty, so it would have produced a
+	 *       span at all. When the body is empty `pushSpan` reports `empty-span`,
+	 *       which is the accurate diagnosis for `$$x$` with display switched off —
+	 *       and the outer loop advances by one anyway, so the later `$` is re-read
+	 *       as an opener without this rule's help. Firing first would merely
+	 *       relabel a real condition;
+	 *   (a) the `$` at `closer` can actually start a span, so there is something to
+	 *       reinterpret (`$x$ costs $5.` must not fire: the candidate is followed
+	 *       by a space and has nothing to open);
+	 *   (b) an **even** count of unescaped `$` remains from `closer`, so that `$`
+	 *       has a natural partner ahead and the *current* opener is the odd one
+	 *       out. This is what keeps `$a$and$b$` as two spans — there the remainder
+	 *       is 3, and reinterpreting would cost a real span to make one bogus one;
+	 *   (c) the nested probe actually closes with a non-empty body, so abandoning
+	 *       the current opener yields a span rather than nothing (on
+	 *       `$5 and$x$10` the later `$` is currency-guarded, and firing would be
+	 *       strictly worse than today).
+	 *
+	 * Rejected alternatives, both measured: refusing a *digit-opened* span kills
+	 * `$5$` and `$2 + 3$`; requiring a spaceless body does not catch `value=$x$`
+	 * at all. `$` in prose is simply not decidable by one character rule, which is
+	 * why conversion stays scoped to the author's selection.
+	 *
+	 * @param {string} text
+	 * @param {number} opener index of the `$` being scanned.
+	 * @param {number} closer candidate closer of that opener.
+	 * @param {object} options merged scanner options.
+	 * @param {Array<number>} dollarFrom suffix count of unescaped `$` per offset.
+	 */
+	function closerIsAlsoAnOpener(text, opener, closer, options, dollarFrom) {
+		if (normalizeLatex(text.substring(opener + 1, closer), options.collapseNewlines) === "") {
+			return false;
+		}
+		if (!canStartInlineMath(text, closer + 1)) {
+			return false;
+		}
+		if (dollarFrom[closer] % 2 !== 0) {
+			return false;
+		}
+		var nested = findDollarClose(text, closer + 1, options);
+		if (nested.index === -1 || nested.guarded) {
+			return false;
+		}
+		// Mirror `pushSpan`: a body that normalizes to nothing would be refused
+		// anyway, so abandoning the current opener would produce nothing at all.
+		return normalizeLatex(text.substring(closer + 1, nested.index), options.collapseNewlines) !== "";
+	}
+
+	/**
 	 * Locate the closing delimiter for a paired-delimiter span (`$$`, `\(`,
 	 * `\[`). Returns the index at which the closing token starts, or -1.
 	 *
@@ -210,6 +270,17 @@
 			return { spans: spans, warnings: warnings };
 		}
 
+		// Unescaped `$` remaining at each offset, including that offset itself.
+		// Precomputed once so `closerIsAlsoAnOpener` can ask "is the remainder
+		// even?" in O(1); counting per candidate would make a `$`-dense paragraph
+		// quadratic. `$$` pairs contribute 2 and are therefore parity-neutral.
+		var dollarFrom = new Array(text.length + 1);
+		dollarFrom[text.length] = 0;
+		for (var d = text.length - 1; d >= 0; d--) {
+			dollarFrom[d] =
+				dollarFrom[d + 1] + (text.charAt(d) === "$" && !isEscaped(text, d) ? 1 : 0);
+		}
+
 		var i = 0;
 		while (i < text.length) {
 			var ch = text.charAt(i);
@@ -265,6 +336,15 @@
 					warnings.push({ code: "guarded-inline-dollar", index: i });
 					handled = true;
 					i = closeInline.index + 1;
+				} else if (closerIsAlsoAnOpener(text, i, closeInline.index, opts, dollarFrom)) {
+					// The candidate closer is an opener in its own right, so this
+					// `$` has no partner: report it as guarded (the same
+					// "left as text by a guard" bucket) and advance by exactly one,
+					// never past `closeInline.index`, so the outer loop re-reads it
+					// as the opener it is.
+					warnings.push({ code: "guarded-inline-dollar", index: i });
+					handled = true;
+					i = i + 1;
 				} else if (
 					pushSpan(
 						spans,

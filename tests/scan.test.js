@@ -382,3 +382,48 @@ test("a closer after a trailing space is guarded, not unterminated", () => {
 	assert.deepStrictEqual(latexOf(result), ["z"]);
 	assert.strictEqual(result.warnings[0].code, "guarded-inline-dollar");
 });
+
+// ---------------------------------------------------------------------------
+// The stolen opener. Reported by a reader of ONLYOFFICE/DesktopEditors#2062:
+// a price earlier in the sentence can steal the *opening* `$` of a real
+// expression that follows. The closer guards only ever inspected the candidate
+// itself, never the `$` being taken from someone else, so `value=$x$` was
+// destroyed with no warning at all — worse than the false positives above,
+// because this one eats correct math.
+// ---------------------------------------------------------------------------
+
+test("an unmatched $ does not steal the opener of a real expression", () => {
+	[
+		["price $5 and$x$ here", ["x"]],
+		["It costs $5, and the value=$x$ here.", ["x"]],
+		["Cost $5, and result=$x+1$ holds.", ["x+1"]]
+	].forEach(([text, expected]) => {
+		const result = findMathSpans(text);
+		assert.deepStrictEqual(latexOf(result), expected, text);
+		assert.deepStrictEqual(
+			result.warnings.map((warning) => warning.code),
+			["guarded-inline-dollar"],
+			text
+		);
+	});
+});
+
+// Parity is what makes the rule fire at all, and this is the case it exists to
+// protect: from the candidate closer the remainder is 3, so that `$` *is* the
+// current opener's partner. Reinterpreting would cost two real spans to make one
+// bogus one.
+test("an odd remainder from the candidate keeps both real spans", () => {
+	const result = findMathSpans("$a$and$b$");
+	assert.deepStrictEqual(latexOf(result), ["a", "b"]);
+	assert.deepStrictEqual(result.warnings, []);
+});
+
+// Both alternatives the rule was rejected for, pinned from the other side: a
+// digit-opened span and a spaced body inside one are legitimate math, so neither
+// may be used as a currency heuristic.
+test("digit-opened and space-containing bodies are still math", () => {
+	assert.deepStrictEqual(latexOf(findMathSpans("Compare $5$ vs $6$.")), ["5", "6"]);
+	const spaced = findMathSpans("If $2 + 3$ then.");
+	assert.deepStrictEqual(latexOf(spaced), ["2 + 3"]);
+	assert.deepStrictEqual(spaced.warnings, []);
+});

@@ -188,6 +188,7 @@ Guard decisions taken while auditing the four delimiter branches (each one is a 
 | An opener followed by whitespace or by punctuation | **not a span** (`CANNOT_START_MATH` = `)]},.;:?!%'"`, plus the whitespace rule). Pinned by fixtures for both, with the deliberate counter-example `Note($i$)` — an *opening* bracket after the opener is still math. |
 | An opener with **no rule about the character before it** | **accepted**, deliberately. `x$y$z` and `f(x)$=y$` are read as math. A preceding-character rule would also reject `text=$x$`, which an author plausibly writes; the guard is not extended without a demonstrated failure. Pinned as a fixture so a later change has to face the decision. |
 | A closer a guard refused | reported as `guarded-inline-dollar`, **not** `unterminated-inline-dollar`, and the loop steps past the refused `$` so it is not re-read as an opener. Before: a page of prices produced one bogus "unterminated" per `$` and the report's *Malformed delimiters* line was noise. Genuinely unmatched openers (`Pay $100 now.`) still report as malformed. |
+| A candidate closer that is **itself an opener** (`closerIsAlsoAnOpener`) | **refuses the closer and abandons the *earlier* opener**, warning `guarded-inline-dollar` and advancing by **one**, never past the candidate, so the outer loop re-reads it as the opener it is. Reported by a reader of `DesktopEditors#2062`: the guards only ever inspected the candidate, never the `$` being taken from someone else, so `It costs $5, and the value=$x$ here.` converted `$5, and the value=$` and left `x$ here.` as prose **with no warning** — correct math eaten, which is worse than a dubious span. Four conditions, each covering a case the others miss: **(0)** the current body is non-empty, so `empty-span` keeps its diagnosis for `$$x$` with display off (the outer loop advances by one there anyway, so the rule is unneeded); **(a)** the candidate can start math; **(b)** an **even** count of unescaped `$` remains from it — parity is what keeps `$a$and$b$` as two spans (remainder 3), and a suffix array makes the test O(1) instead of quadratic; **(c)** a nested close succeeds with a non-empty body, since firing where the later `$` is currency-guarded (`$5 and$x$10`) would yield nothing. Rejected alternatives, both measured: refusing a *digit-opened* span kills `$5$` and `$2 + 3$`; requiring a spaceless body does not catch `value=$x$` at all. |
 
 `aligned` was removed from the read command in the same pass: it was a per-paragraph comparison nothing
 read, and keeping a field that *looks* like a gate is how §1.7 happened.
@@ -386,11 +387,13 @@ look: a conversion must not consume neighbouring characters.
 
 ## 4. Test layout
 
-`node --test tests/` → 117 tests.
+`node --test tests/` → 120 tests.
 
 * `scan.test.js` — the delimiter core: escapes, currency guard, `$$` precedence, unterminated spans,
   the blank-line rule, the guard decisions (a whitespace-preceded closer abandons its opener without
-  poisoning the line; a currency run cannot drag a later real span into math), offset planning, and the
+  poisoning the line; a currency run cannot drag a later real span into math; and a candidate closer
+  that is itself an opener abandons the *earlier* one instead of stealing its `$` — with `$a$and$b$`
+  as the parity counter-example), offset planning, and the
   paragraph-offset filter (a paragraph whose length comparison fails must still be scanned; only an
   unreadable one is set aside).
 * `plugin-harness.js` — a fake browser window plus a fake editor; it mirrors the host's *gates*, not
