@@ -346,7 +346,7 @@ from Node over the CDP websocket. Frame contexts:
   the plugin are **iframes of one target**, not targets of their own, so `/json` alone shows only the
   host page and a waiting loader and looks like "no editor frame". `ctx.mjs` dumps
   `Runtime.executionContextCreated` after `Runtime.enable` (existing contexts are replayed), which is
-  how the **1** host / **2** editor shell / **4** plugin / **5** shipped-AI map is confirmed each time.
+  how the host / editor shell / plugin / shipped-AI contexts are identified each time. **Context ids are not stable across boots** — one boot gave 1/2/4/5, the next gave 1/3 — so never hard-code them: enumerate, then match on `origin` (`file://` for the host and shell, `onlyoffice://plugin` for the shipped AI plugin) and on the frame id, and confirm the plugin frame by evaluating something only our frame has, such as `window.OnlyOfficeLatexMathApi`.
   `dbg.mjs` enables `Debugger`, finds the `scan.js` `scriptId`, and reads `Debugger.getScriptSource` —
   the only reliable way to prove the *running* script is the one just installed.
   Launch in a subshell or the harness kills the GUI when the call returns, and **pass
