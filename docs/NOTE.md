@@ -377,6 +377,35 @@ tab.
 | Silent reports during a hotkey run | `Asc.plugin._windows` is empty; `settings.openReport` stays `false`, so the chord opens nothing |
 | Injected `Ctrl`/`Alt` chords (the caveat) | `xdotool key ctrl+alt+m` and `key alt+l` both lose their modifiers *for the letter event* (§1.10), which is why the live negative control for `Ctrl+L` cannot distinguish "modifier arrived and was ignored" from "modifier was never delivered". The exact-modifier-set rule is asserted in `tests/hotkey.test.js` instead |
 
+### (6) Live pass — 2026-09-23, closing the `895ef72` gap
+
+App launched with `--remote-debugging-port=9222 --remote-allow-origins=*`; contexts **1** host,
+**2** editor shell, **4** plugin (§2). Fixture `phase8-fixture.docx`, four paragraphs built from
+scratch (no `.docx` existed in the repo), opened via `desktopeditors <file>` **after** the instance
+with the debug port was already up — a first attempt with only the file argument silently started a
+second instance with no CDP, which showed as "no editor frame" until the contexts were enumerated
+properly. **Never drive `callCommand` concurrently**: two parallel invocations produced
+`unparsable-command-result` and `no response from editor`; sequential + 500 ms works.
+
+| Check | Observed |
+| :--- | :--- |
+| The running script is the fixed build | `Debugger.getScriptSource` on the plugin frame → marker **`refusedDollarIsAnOpener` PRESENT**; installed file **md5 `66760f31733332000ed3c92308eb8e2e`, 21899 B** — byte-identical to the repo. CDP reported **21893 B** for the same file: a 6-byte engine artifact, so a raw byte count is a *discriminator* (a stale copy once differed by 663 B) but not an identity check — compare hashes |
+| **REPRO** `cost $5, that will be $x+5$`, selected and converted | `Converted: 1 / 1`, `Delimiters still present: 0`, `Undo point created: yes`. Saved OOXML: `cost $5, ` + `<m:oMath>x+5</m:oMath>`; literal `$x+5$` **gone**, the price `$5` intact. **This is the defect phase 8 exists for — it converted nothing before** |
+| **The hole** `cost $5, then $10 and 20$ here`, selected and converted | `0 LaTeX spans found`, `Nothing to convert`, `Left as text by a guard: {"guarded-inline-dollar":1}`. Saved text byte-identical with all three `$` — no equation out of two prices |
+| **Invariant** `It costs 5$ and 6$ later.`, selected and converted | `0 LaTeX spans found`, no span, no phantom — saved text intact |
+| **Rejected alternative** `Compare $5$ vs $6$.`, selected and converted | `Converted: 2 / 2`; `<m:oMath>5</m:oMath>` and `<m:oMath>6</m:oMath>`, literals `$5$`/`$6$` gone |
+| Saved OOXML totals (`DesktopOfflineAppDocumentStartSave(false)` in ctx **2**) | **3 `<m:oMath>`, 0 `<m:oMathPara>`** (all four inputs inline), file 1719 → **25480 B**, **no stray chord letter** |
+
+**Consequence observed while doing this, not a regression:** once row 1's `$x+5$` is converted, its
+neighbouring price `$5` is left with no partner, so the *next* scan reports
+`Malformed delimiters: {"unterminated-inline-dollar":1}` for an ordinary price. That matches the
+recorded decision that a genuinely unmatched `$` still reports as malformed — but the author now sees
+their own price called malformed *as a result of a successful conversion*. Report-only; no conversion is
+affected. Flagged for the reviewer rather than changed here.
+
+**The standing `895ef72` live-verification gap is now closed**: the scanner's user-visible behaviour has
+been confirmed against a real document in the real editor, not only by unit tests.
+
 **Open item, not caused by this phase** (recorded 2026-09-20): converting the live ` $$x=1$$` paragraph
 above produced a saved file whose leading space is gone. Before: one run,
 `<w:t xml:space="preserve"> $$x=1$$</w:t>` (a leading space inside the text). After: an **empty** run,
