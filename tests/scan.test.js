@@ -289,7 +289,9 @@ test("collectParagraphs keeps a paragraph whose length comparison fails", () => 
 	};
 	const collected = collectParagraphs(snapshot);
 	assert.strictEqual(collected.unusable, 0);
-	assert.deepStrictEqual(collected.paragraphs, [{ start: 24, text: " $$x=1$$\r\n" }]);
+	// `end` now travels too: it is the bound for the char -> position probe
+	// (REPRO row 2), and the paragraph itself is still kept.
+	assert.deepStrictEqual(collected.paragraphs, [{ start: 24, end: 35, text: " $$x=1$$\r\n" }]);
 });
 
 test("collectParagraphs still reports a paragraph that cannot be read", () => {
@@ -542,4 +544,73 @@ test("CONTROL: a nested refusal reports the orphan, not the price behind it", ()
 		["guarded-inline-dollar", "guarded-inline-dollar"],
 		"no price may be reported as malformed"
 	);
+});
+
+// ---------------------------------------------------------------------------
+// Repro row 1, live editor. The row's literal symptom - "`$x$y$` collapsed
+// into a single math-italic xy" - was a stale-build artifact and is
+// **unproven** on the current build (HEAD was measured live giving literal
+// `$x` + oMath(y)). What IS reproduced live is the semantic defect: pair-y
+// promotes the prose token `y` to math and strands the author's delimited
+// `$x$` as text. Q2 decision pinned here: **pair x** - first open, first
+// close, the rule TeX itself follows - so `$x$` converts and the orphan `$`
+// after `y` stays visible text. Refusing both strands `$x$` too and, worse,
+// cannot be defended against `$x$y$ and $z$` without run-detection rewrite.
+//
+// The branch that used to pair y is `closerIsAlsoAnOpener` (condition (w)
+// there now refuses to fire on a spaceless body). The counterexample below is
+// the defence the spec demanded: the odd run must not eat `$z$` behind it.
+// ---------------------------------------------------------------------------
+
+test("REPRO row 1: $x$y$ pairs the first expression and leaves the orphan visible", () => {
+	const result = findMathSpans("$x$y$");
+	assert.deepStrictEqual(latexOf(result), ["x"], "first open, first close");
+	assert.deepStrictEqual(result.warnings, [], "the orphan is a trailing `$`, not a guard refusal");
+});
+
+test("REPRO row 1: the odd run never eats the good $z$ behind it", () => {
+	const result = findMathSpans("$x$y$ and $z$");
+	assert.deepStrictEqual(latexOf(result), ["x", "z"]);
+	assert.deepStrictEqual(result.warnings, []);
+});
+
+// ---------------------------------------------------------------------------
+// The keystroke property the spec's Q4 pins: across prefix-by-prefix typing,
+// a span once formed must survive every later keystroke. Wrong intermediate
+// spans that correct themselves are allowed, so only spans that exist in the
+// finished string are tracked; each must never disappear after it first
+// appears. The three strings are the spec's named set; `$x$y$` is row 1's
+// own string, where pair-y used to kill the `$x$` span formed at k=3.
+// ---------------------------------------------------------------------------
+
+test("KEYSTROKE: a span once formed survives every later keystroke", () => {
+	function keys(result) {
+		return result.spans.map(function (span) {
+			return span.start + ":" + span.end + ":" + span.latex;
+		});
+	}
+	["$x$$y$", "price $5 and$x$ here", "cost $5, that will be $x+5$", "$x$y$"].forEach(function (text) {
+		const perPrefix = [];
+		for (let k = 1; k <= text.length; k++) {
+			perPrefix[k] = keys(findMathSpans(text.slice(0, k)));
+		}
+		const final = perPrefix[text.length];
+		const firstSeen = {};
+		final.forEach(function (key) {
+			for (let k = 1; k <= text.length; k++) {
+				if (perPrefix[k].indexOf(key) !== -1) {
+					firstSeen[key] = k;
+					return;
+				}
+			}
+		});
+		final.forEach(function (key) {
+			for (let k = firstSeen[key]; k <= text.length; k++) {
+				assert.ok(
+					perPrefix[k].indexOf(key) !== -1,
+					text + ": span " + key + " formed at prefix " + firstSeen[key] + " disappeared at prefix " + k
+				);
+			}
+		});
+	});
 });

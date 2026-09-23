@@ -221,7 +221,7 @@
 	 * as prose, with no warning at all — the closer guards only ever inspected the
 	 * candidate itself, never the `$` being taken from someone else.
 	 *
-	 * All four conditions are required; each one covers a case the others miss:
+	 * All five conditions are required; each one covers a case the others miss:
 	 *
 	 *   (0) the current opener's body is non-empty, so it would have produced a
 	 *       span at all. When the body is empty `pushSpan` reports `empty-span`,
@@ -236,6 +236,18 @@
 	 *       has a natural partner ahead and the *current* opener is the odd one
 	 *       out. This is what keeps `$a$and$b$` as two spans — there the remainder
 	 *       is 3, and reinterpreting would cost a real span to make one bogus one;
+	 *   (w) the current opener's body contains **whitespace**, so the opener is an
+	 *       unmatched `$` that has swallowed prose. On a spaceless body both
+	 *       candidate pairings are token-local and reading order decides instead —
+	 *       first open, first close, the rule TeX follows: `$x$y$` pairs `x` and
+	 *       leaves the trailing `$` visible, rather than promoting the prose token
+	 *       `y` to math and stranding the author's `$x$` (live repro row 1). Every
+	 *       steal this rule exists for has a whitespace-bearing body
+	 *       (`"$5, and the value="`), so all pinned cases still fire. This is the
+	 *       inverse of the rejected "spaceless body" alternative recorded below:
+	 *       there the body's shape was meant to *identify* the stealing opener;
+	 *       here a spaceless body *vetoes* abandoning it, because no prose can be
+	 *       being swallowed;
 	 *   (c) the nested probe actually closes with a non-empty body, so abandoning
 	 *       the current opener yields a span rather than nothing (on
 	 *       `$5 and$x$10` the later `$` is currency-guarded, and firing would be
@@ -253,13 +265,23 @@
 	 * @param {Array<number>} dollarFrom suffix count of unescaped `$` per offset.
 	 */
 	function closerIsAlsoAnOpener(text, opener, closer, options, dollarFrom) {
-		if (normalizeLatex(text.substring(opener + 1, closer), options.collapseNewlines) === "") {
+		var body = text.substring(opener + 1, closer);
+		if (normalizeLatex(body, options.collapseNewlines) === "") {
 			return false;
 		}
 		if (!canStartInlineMath(text, closer + 1)) {
 			return false;
 		}
 		if (dollarFrom[closer] % 2 !== 0) {
+			return false;
+		}
+		// (w) A spaceless body is a token, not prose: both candidate pairings are
+		// token-local, so reading order decides - first open, first close - and
+		// this rule must not steal the pair TeX would make (`$x$y$` pairs `x`).
+		// That is row 1's semantic defect, measured live; the row's literal
+		// "single math-italic xy" symptom was a stale build and is unproven on
+		// the current one. Every real steal has a whitespace-bearing body.
+		if (!/\s/.test(body)) {
 			return false;
 		}
 		var nested = findDollarClose(text, closer + 1, options);
@@ -496,6 +518,29 @@
 	}
 
 	/**
+	 * A paragraph may carry a resolved `positions` map (char offset -> absolute
+	 * document position) written by the editor-side probe in code.js. It exists
+	 * for paragraphs whose content items cost more positions than the characters
+	 * they render — an inline equation counts 3 positions for the 1 character
+	 * its text shows — where `paragraph.start + span.start` lands early, the
+	 * apply-time text check refuses the span and the conversion silently does
+	 * nothing (live repro row 2). Offsets the probe could not resolve fall back
+	 * to the best-effort arithmetic, and APPLY_BODY's `text-mismatch` guard stays
+	 * the safety net behind both.
+	 *
+	 * @param {{start: number, positions?: Object}} paragraph
+	 * @param {number} charOffset offset inside `paragraph.text`
+	 * @returns {number} absolute document position
+	 */
+	function positionOf(paragraph, charOffset) {
+		var map = paragraph.positions;
+		if (map && typeof map === "object" && typeof map[charOffset] === "number") {
+			return map[charOffset];
+		}
+		return paragraph.start + charOffset;
+	}
+
+	/**
 	 * Turn per-paragraph scan results into document-level replacement operations.
 	 *
 	 * @param {Array<{start: number, text: string}>} paragraphs paragraph start
@@ -518,14 +563,14 @@
 						code: warning.code,
 						index: warning.index,
 						paragraphIndex: paragraphIndex,
-						absoluteIndex: paragraph.start + warning.index
+						absoluteIndex: positionOf(paragraph, warning.index)
 					};
 				})
 			);
 
 			result.spans.forEach(function (span) {
-				var absoluteStart = paragraph.start + span.start;
-				var absoluteEnd = paragraph.start + span.end;
+				var absoluteStart = positionOf(paragraph, span.start);
+				var absoluteEnd = positionOf(paragraph, span.end);
 				var operation = {
 					paragraphIndex: paragraphIndex,
 					start: absoluteStart,
@@ -570,7 +615,7 @@
 	 * discarded, and only the genuinely unreadable ones are counted as unusable.
 	 *
 	 * @param {{paragraphs: Array}} snapshot
-	 * @returns {{paragraphs: Array<{start: number, text: string}>, unusable: number}}
+	 * @returns {{paragraphs: Array<{start: number, end: number, text: string}>, unusable: number}}
 	 */
 	function collectParagraphs(snapshot) {
 		var paragraphs = [];
@@ -580,7 +625,13 @@
 				unusable++;
 				return;
 			}
-			paragraphs.push({ start: paragraph.start, text: paragraph.text });
+			var entry = { start: paragraph.start, text: paragraph.text };
+			if (typeof paragraph.end === "number") {
+				// The range span: the upper bound for the char -> position probe
+				// in code.js. Absent when a snapshot did not carry it.
+				entry.end = paragraph.end;
+			}
+			paragraphs.push(entry);
 		});
 		return { paragraphs: paragraphs, unusable: unusable };
 	}

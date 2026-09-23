@@ -939,3 +939,36 @@ test("a genuinely unmatched dollar still reports as malformed", async () => {
 		"a lone `$` is not a guard rejection: " + JSON.stringify(lines)
 	);
 });
+
+// ---------------------------------------------------------------------------
+// Repro row 2, live editor (CDP, build == HEAD): `x $y$` where `x` is already
+// a native equation object. The paragraph then counts 3 positions for the 1
+// character the equation renders, so `paragraph.start + span.start` (scan.js)
+// lands at 10 while the real `$y$` sits at 12..15 - APPLY_BODY's text-mismatch
+// guard refuses it and the report says `Skipped (text-mismatch) @10`. Measured
+// live: `Converted: 0 / 1`. The fix resolves char offsets to positions before
+// planning against the selection; this fixture goes green only then.
+// ---------------------------------------------------------------------------
+
+test("REPRO row 2: an equation inside the paragraph does not shift the span out of reach", async () => {
+	const editor = createEditor({ equationPositionCost: 3, paragraphs: ["$x$y$", "x $y$", "control $a$"] });
+	// Model the live paragraph exactly: equation object first, literal run behind.
+	// `segments()` returns a fresh array of the live references, so the change
+	// must go through the referenced array, not an assignment into the copy.
+	const row2 = editor.segments()[1];
+	row2.splice(0, row2.length, { type: "math", latex: "x" }, { type: "text", value: " $y$" });
+	// Select the whole second paragraph, as the live hand-test did.
+	editor.state.selection = { start: 6, end: 13 };
+
+	const harness = createHarness(editor);
+	harness.init();
+	const report = await harness.convertSelection();
+
+	assert.ok(
+		report.lines.some((line) => line.includes("Converted: 1 / 1")),
+		JSON.stringify(report.lines)
+	);
+	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["x", "y"]);
+	const row2Text = editor.text().split("\n")[1];
+	assert.ok(!row2Text.includes("$y$"), "the literal run must convert: " + row2Text);
+});

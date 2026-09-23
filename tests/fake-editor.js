@@ -42,6 +42,12 @@ function createEditor(options) {
 		currentMath: null,
 		selection: options.selection || null,
 		mathRendersAsPlaceholder: !!options.mathRendersAsPlaceholder,
+		// Positions an equation object costs, as opposed to the character it
+		// renders. The live editor counts an inline `oMath` as 3 positions for the
+		// 1 character its text shows, which is what makes `paragraph.start +
+		// span.start` drift (REPRO row 2). Default 1 keeps every other fixture on
+		// the plain 1:1 geometry.
+		equationPositionCost: options.equationPositionCost || 1,
 		failInsert: options.failInsert || {},
 		// The caret an ApiDocument.AddMathEquation call inserts at. It starts at the
 		// top of the document, which is where the editor leaves it for a command
@@ -82,6 +88,9 @@ function createEditor(options) {
 	function segmentContentLength(segment) {
 		if (segment.type === "text") {
 			return segment.value.length;
+		}
+		if (segment.type === "math") {
+			return state.equationPositionCost;
 		}
 		return 1;
 	}

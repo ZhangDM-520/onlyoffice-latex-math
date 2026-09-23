@@ -147,7 +147,10 @@ Detection is deliberately biased towards *not* discarding anything:
    back-to-front so earlier offsets stay valid, and everything lands in one undo step.
 4. **A `$` is never taken from a real expression to close a stray one.** When the candidate closer
    could itself open a complete span ahead — it can start math, an even number of `$` remains from it,
-   and it really does close — the *earlier* opener is the one abandoned, and it is reported as guarded
+   and it really does close — **and the earlier opener's own body spans whitespace** (a stray `$` that
+   swallowed prose; on a spaceless body both pairings are token-local and reading order keeps the
+   earlier opener, so `$x$y$` pairs `x` and leaves the trailing `$` visible) — the *earlier* opener is
+   the one abandoned, and it is reported as guarded
    rather than converted. Without this, `It costs $5, and the value=$x$ here.` turned
    `$5, and the value=$` into an equation and left `x$ here.` as prose, silently. The same holds when a
    guard *refuses* the closer: the refused `$` is re-read as an opener only if it is not a price and
@@ -197,7 +200,7 @@ goes missing.
 ## Tests
 
 ```bash
-node --test tests/          # 128 tests: scanner, icons, hotkeys, harness, integration, report
+node --test tests/          # 132 tests: scanner, icons, hotkeys, harness, integration, report
 ```
 
 `plugin/scripts/scan.js` is the pure core (delimiter rules, offset planning) and is deliberately free
