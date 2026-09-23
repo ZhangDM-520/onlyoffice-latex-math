@@ -173,10 +173,17 @@
 	 *       `i = refused + 1` both land on `refused + 1`. It names the intent where
 	 *       the decision is taken instead of leaving it to be re-derived from the
 	 *       loop below;
-	 *   (nested close) a nested `findDollarClose` must actually close with a
-	 *       non-empty body, so re-offering yields a span. Without it,
-	 *       `cost $5, see $blah and more` gains a phantom `unterminated` beside the
-	 *       guarded one -- the exact failure the invariant exists to prevent.
+	 *   (nested close) a nested `findDollarClose` must have found *some* candidate
+	 *       with a non-empty body, so re-offering is worth the re-read. Without a
+	 *       candidate at all, `cost $5, see $blah and more` gains a phantom
+	 *       `unterminated` beside the guarded one -- the exact failure the invariant
+	 *       exists to prevent. Note that a nested result which is *itself* guarded
+	 *       still counts as a candidate: refusing here would walk past `$x` in
+	 *       `cost $5, see $x and $10` and then call the trailing price
+	 *       `unterminated`, hiding a real attempt while reporting a price as
+	 *       malformed -- the opposite of what the malformed bucket is for. The
+	 *       span decision is never taken from this helper; it only decides where
+	 *       the loop resumes, and the normal guards apply from there.
 	 *
 	 * Parity (`dollarFrom`) is deliberately NOT applied here, unlike
 	 * `closerIsAlsoAnOpener`: there it decides which of two competing openers is the
@@ -196,7 +203,7 @@
 			return false;
 		}
 		var nested = findDollarClose(text, refused + 1, options);
-		if (nested.index === -1 || nested.guarded) {
+		if (nested.index === -1) {
 			return false;
 		}
 		// Mirror `pushSpan`: a body that normalizes to nothing would be refused

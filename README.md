@@ -151,8 +151,9 @@ Detection is deliberately biased towards *not* discarding anything:
    rather than converted. Without this, `It costs $5, and the value=$x$ here.` turned
    `$5, and the value=$` into an equation and left `x$ here.` as prose, silently. The same holds when a
    guard *refuses* the closer: the refused `$` is re-read as an opener only if it is not a price and
-   really does close, so `cost $5, that will be $x+5$` converts `$x+5$` instead of swallowing it while
-   `$10-$20` still reports one guarded warning and no phantom. `$` in prose is not decidable by one
+   really does close with a non-empty body, so `cost $5, that will be $x+5$` converts `$x+5$` instead
+   of swallowing it while `$10-$20` still reports one guarded warning and no phantom. `$` in prose is
+   not decidable by one
    character rule (rejecting digit-opened spans would break `$5$` and `$2 + 3$`), which is also why
    conversion is scoped to the selection you made.
 
@@ -196,7 +197,7 @@ goes missing.
 ## Tests
 
 ```bash
-node --test tests/          # 127 tests: scanner, icons, hotkeys, harness, integration, report
+node --test tests/          # 128 tests: scanner, icons, hotkeys, harness, integration, report
 ```
 
 `plugin/scripts/scan.js` is the pure core (delimiter rules, offset planning) and is deliberately free

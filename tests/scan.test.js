@@ -528,3 +528,18 @@ test("ACCEPTED: a compact $10$ behind a price stays text (measured)", () => {
 		["guarded-inline-dollar"]
 	);
 });
+
+test("CONTROL: a nested refusal reports the orphan, not the price behind it", () => {
+	// `findDollarClose` for the refused `$` in `$x` lands on `$10`, which the
+	// currency guard refuses. Re-offering is still right: the loop then reports
+	// `$x` as guarded (a real attempt, left as text by a guard) instead of walking
+	// past it and calling the trailing price `unterminated` -- the malformed bucket
+	// exists precisely so a page of prices is not reported as broken LaTeX.
+	const result = findMathSpans("cost $5, see $x and $10");
+	assert.deepStrictEqual(result.spans, []);
+	assert.deepStrictEqual(
+		result.warnings.map((warning) => warning.code),
+		["guarded-inline-dollar", "guarded-inline-dollar"],
+		"no price may be reported as malformed"
+	);
+});
