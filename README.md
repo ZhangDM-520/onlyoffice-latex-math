@@ -149,9 +149,12 @@ Detection is deliberately biased towards *not* discarding anything:
    could itself open a complete span ahead — it can start math, an even number of `$` remains from it,
    and it really does close — the *earlier* opener is the one abandoned, and it is reported as guarded
    rather than converted. Without this, `It costs $5, and the value=$x$ here.` turned
-   `$5, and the value=$` into an equation and left `x$ here.` as prose, silently. `$` in prose is not
-   decidable by one character rule (rejecting digit-opened spans would break `$5$` and `$2 + 3$`),
-   which is also why conversion is scoped to the selection you made.
+   `$5, and the value=$` into an equation and left `x$ here.` as prose, silently. The same holds when a
+   guard *refuses* the closer: the refused `$` is re-read as an opener only if it is not a price and
+   really does close, so `cost $5, that will be $x+5$` converts `$x+5$` instead of swallowing it while
+   `$10-$20` still reports one guarded warning and no phantom. `$` in prose is not decidable by one
+   character rule (rejecting digit-opened spans would break `$5$` and `$2 + 3$`), which is also why
+   conversion is scoped to the selection you made.
 
 ## Report window
 
@@ -193,7 +196,7 @@ goes missing.
 ## Tests
 
 ```bash
-node --test tests/          # 120 tests: scanner, icons, hotkeys, harness, integration, report
+node --test tests/          # 127 tests: scanner, icons, hotkeys, harness, integration, report
 ```
 
 `plugin/scripts/scan.js` is the pure core (delimiter rules, offset planning) and is deliberately free
@@ -212,3 +215,8 @@ that talks to the host and runs the editor commands through `Asc.plugin.callComm
   decides* above.
 * Live conversion *while typing* would require patching sdkjs (`RunAutoCorrect.js`) and rebuilding
   onlyoffice-git — explicitly out of scope.
+* A **price is never re-offered as an opener**, so compact math that sits *behind* one is left alone:
+  in `cost $5, and $10$ is wrong` nothing is converted. Recovering it needs a rule about the shape of
+  the body, and such a rule would also refuse `$2 + 3$` there. Deliberate — a missed span stays text
+  you can select and convert by hand, while a wrong span deletes prose with no rollback. Pinned as a
+  test; see *How detection decides* and `docs/NOTE.md`.

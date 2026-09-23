@@ -142,6 +142,69 @@
 	}
 
 	/**
+	 * True when a `$` a guard has just *refused as a closer* should nevertheless
+	 * be re-read as an opener.
+	 *
+	 * The invariant behind stepping past a refused `$` is sound, and the comment on
+	 * `findDollarClose` states it: re-offering a refused `$` would let `$10-$20`
+	 * report a guarded span *plus* a phantom `unterminated-inline-dollar`. It fails
+	 * when the refusal came from the **whitespace** guard rather than the currency
+	 * one, because then the refused `$` may be the opener of a real expression. On
+	 * `cost $5, that will be $x+5$` the candidate closer is the `$` before `x`,
+	 * refused only because a space precedes it, and stepping past it skips that
+	 * opener entirely -- the sentence converts to nothing while reporting one
+	 * guarded warning. Isolating `$x+5$` into its own paragraph "fixes" it purely
+	 * by removing the price from the scan.
+	 *
+	 * Three conditions, each doing work the others cannot:
+	 *
+	 *   (currency) a refusal where the next character is a digit is a *price* and is
+	 *       never re-offered. `findDollarClose` checks the digit first, so this
+	 *       identifies exactly which guard fired. Without it, a US-style price pairs
+	 *       with a European-style suffix into one equation out of two prices
+	 *       (`cost $5, then $10 and 20$ here` -> `$10 and 20$`), which is the worst
+	 *       outcome this scanner can produce: deleted prose, no rollback. It also
+	 *       costs `cost $5, and $10$ is wrong`, where `$10$` is real math behind a
+	 *       price -- accepted deliberately and pinned as a test, because a missed
+	 *       span stays visible text while a wrong one does not;
+	 *   (canStart) whether the refused `$` can start math. Kept deliberately for
+	 *       readability even though it is behaviourally redundant: when it is false,
+	 *       visiting `refused` as an opener is impossible, so `i = i + 1` and
+	 *       `i = refused + 1` both land on `refused + 1`. It names the intent where
+	 *       the decision is taken instead of leaving it to be re-derived from the
+	 *       loop below;
+	 *   (nested close) a nested `findDollarClose` must actually close with a
+	 *       non-empty body, so re-offering yields a span. Without it,
+	 *       `cost $5, see $blah and more` gains a phantom `unterminated` beside the
+	 *       guarded one -- the exact failure the invariant exists to prevent.
+	 *
+	 * Parity (`dollarFrom`) is deliberately NOT applied here, unlike
+	 * `closerIsAlsoAnOpener`: there it decides which of two competing openers is the
+	 * odd one out, whereas here the current opener has already produced nothing, so
+	 * abandoning it costs no span -- and an odd remainder would wrongly refuse
+	 * `cost $5, be $x+5$ and $10`, where `$x+5$` is followed by a third price.
+	 *
+	 * @param {string} text
+	 * @param {number} refused index of the `$` the guard refused.
+	 * @param {object} options merged scanner options.
+	 */
+	function refusedDollarIsAnOpener(text, refused, options) {
+		if (options.currencyGuard && isDigit(text.charAt(refused + 1))) {
+			return false;
+		}
+		if (!canStartInlineMath(text, refused + 1)) {
+			return false;
+		}
+		var nested = findDollarClose(text, refused + 1, options);
+		if (nested.index === -1 || nested.guarded) {
+			return false;
+		}
+		// Mirror `pushSpan`: a body that normalizes to nothing would be refused
+		// anyway, so re-offering the `$` would produce nothing at all.
+		return normalizeLatex(text.substring(refused + 1, nested.index), options.collapseNewlines) !== "";
+	}
+
+	/**
 	 * True when the candidate `closer` should be read as an **opener** in its own
 	 * right, abandoning the span whose closer it currently is.
 	 *
@@ -332,10 +395,14 @@
 					warnings.push({ code: "unterminated-inline-dollar", index: i });
 				} else if (closeInline.guarded) {
 					// A guard refused the closer: not a malformed span, a non-span.
-					// Step past the refused `$` so it is not re-read as an opener.
+					// Step past the refused `$` so it is not re-read as an opener --
+					// *unless* it is itself a legitimate opener, in which case
+					// stepping past would swallow the real expression that follows.
 					warnings.push({ code: "guarded-inline-dollar", index: i });
 					handled = true;
-					i = closeInline.index + 1;
+					i = refusedDollarIsAnOpener(text, closeInline.index, opts)
+						? i + 1
+						: closeInline.index + 1;
 				} else if (closerIsAlsoAnOpener(text, i, closeInline.index, opts, dollarFrom)) {
 					// The candidate closer is an opener in its own right, so this
 					// `$` has no partner: report it as guarded (the same

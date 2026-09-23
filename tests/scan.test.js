@@ -427,3 +427,104 @@ test("digit-opened and space-containing bodies are still math", () => {
 	assert.deepStrictEqual(latexOf(spaced), ["2 + 3"]);
 	assert.deepStrictEqual(spaced.warnings, []);
 });
+
+// ---------------------------------------------------------------------------
+// A price that comes first swallows the expression that follows it.
+//
+// `cost $5, that will be $x+5$` reports one guarded warning and converts
+// nothing: the guarded arm of the inline branch sets `i = closeInline.index + 1`,
+// landing past the `$` that opens `$x+5$`. Isolating the expression into its own
+// paragraph "fixes" it only because the price is then not in the scan.
+//
+// Two conditions separate this from the invariant the step-past exists for:
+// which guard fired, and whether the refused `$` really closes. See
+// `refusedDollarIsAnOpener` in plugin/scripts/scan.js.
+// ---------------------------------------------------------------------------
+
+test("REPRO: a leading price must not swallow space-separated math", () => {
+	const text = "cost $5, that will be $x+5$";
+	const result = findMathSpans(text);
+	assert.deepStrictEqual(
+		result.spans.map((span) => span.raw),
+		["$x+5$"],
+		"the real expression must survive a price earlier in the sentence"
+	);
+	assert.deepStrictEqual(
+		result.warnings.map((warning) => warning.code),
+		["guarded-inline-dollar"],
+		"the price reports as guarded, not as a converted span"
+	);
+});
+
+test("REPRO: price, math and a trailing price still converts the math", () => {
+	const text = "cost $5, be $x+5$ and $10";
+	const result = findMathSpans(text);
+	assert.deepStrictEqual(result.spans.map((span) => span.raw), ["$x+5$"]);
+	assert.deepStrictEqual(
+		result.warnings.map((warning) => warning.code),
+		["guarded-inline-dollar", "unterminated-inline-dollar"]
+	);
+});
+
+test("CONTROL: the same sentence without the price converts unchanged", () => {
+	const text = "cost X, that will be $x+5$";
+	const result = findMathSpans(text);
+	assert.deepStrictEqual(result.spans.map((span) => span.raw), ["$x+5$"]);
+	assert.deepStrictEqual(result.warnings, []);
+});
+
+test("CONTROL: a US price and a European 20$ never pair into one equation", () => {
+	// The currency refusal must never be re-offered: otherwise a `$N` price and a
+	// later `N$` become one equation out of two prices, which is deleted prose
+	// with no rollback.
+	const result = findMathSpans("cost $5, then $10 and 20$ here");
+	assert.deepStrictEqual(result.spans, []);
+	assert.deepStrictEqual(
+		result.warnings.map((warning) => warning.code),
+		["guarded-inline-dollar"]
+	);
+});
+
+test("CONTROL: $10-$20 yields one guarded warning and no phantom", () => {
+	// The invariant the step-past exists for: re-offering a refused `$` that has
+	// no closer ahead would add an `unterminated-inline-dollar` beside the guarded
+	// one.
+	const pair = findMathSpans("$10-$20");
+	assert.deepStrictEqual(pair.spans, []);
+	assert.deepStrictEqual(
+		pair.warnings.map((warning) => warning.code),
+		["guarded-inline-dollar"]
+	);
+
+	const prose = findMathSpans("$5 and $10 later");
+	assert.deepStrictEqual(prose.spans, []);
+	assert.deepStrictEqual(
+		prose.warnings.map((warning) => warning.code),
+		["guarded-inline-dollar"]
+	);
+});
+
+test("CONTROL: re-offering happens only when the refused $ actually closes", () => {
+	// Whitespace guard fires, so the `$` is eligible for re-offering -- but it has
+	// no closer of its own. Without the nested-close condition this gains a
+	// phantom `unterminated` beside the guarded warning.
+	const result = findMathSpans("cost $5, see $blah and more");
+	assert.deepStrictEqual(result.spans, []);
+	assert.deepStrictEqual(
+		result.warnings.map((warning) => warning.code),
+		["guarded-inline-dollar"]
+	);
+});
+
+test("ACCEPTED: a compact $10$ behind a price stays text (measured)", () => {
+	// Deliberate, not an oversight: currency refusals are never re-offered, so
+	// this real expression behind a price is left alone. A missed span stays
+	// visible text the author can select; a wrong span does not. Pinned so the
+	// decision cannot drift silently.
+	const result = findMathSpans("cost $5, and $10$ is wrong");
+	assert.deepStrictEqual(result.spans, []);
+	assert.deepStrictEqual(
+		result.warnings.map((warning) => warning.code),
+		["guarded-inline-dollar"]
+	);
+});
