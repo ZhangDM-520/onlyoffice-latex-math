@@ -5,8 +5,8 @@ const assert = require("node:assert");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const core = require(path.join(__dirname, "..", "plugin", "scripts", "scan.js"));
 const commands = require(path.join(__dirname, "..", "plugin", "scripts", "commands.js"));
+const locate = require(path.join(__dirname, "..", "plugin", "scripts", "locate.js"));
 const { createEditor } = require(path.join(__dirname, "fake-editor.js"));
 const { createHarness } = require(path.join(__dirname, "plugin-harness.js"));
 
@@ -60,13 +60,25 @@ function apply(editor, plan, extra) {
 	});
 }
 
+// The probe seam, stubbed to resolve nothing: every placement then falls back
+// to the arithmetic `paragraph.start + charOffset`, which is the plan this
+// file's fixtures were measured against. The probe itself is exercised through
+// the harness (see REPRO row 2 below).
+function arithmeticResolver() {
+	return Promise.resolve([]);
+}
+
 /** read -> plan -> apply, the exact sequence code.js performs. */
-function convertAll(editor, options, filter) {
+async function convertAll(editor, options, filter) {
 	const snapshot = read(editor);
-	const collected = core.collectParagraphs(snapshot);
-	const plan = core.planReplacements(collected.paragraphs, options || PLUGIN_DEFAULTS, filter || null);
+	const plan = await locate.plan(snapshot, options || PLUGIN_DEFAULTS, filter || null, arithmeticResolver);
 	const result = apply(editor, plan);
-	return { snapshot, collected, plan, result };
+	return { snapshot, plan, result };
+}
+
+/** The plan step on its own, with the probe stubbed to prove nothing. */
+function planArithmetic(snapshot, filter) {
+	return locate.plan(snapshot, PLUGIN_DEFAULTS, filter || null, arithmeticResolver);
 }
 
 /**
@@ -219,7 +231,7 @@ test("a paragraph that cannot be read is reported, not silently dropped", async 
 	);
 });
 
-test("whole-document conversion replaces every delimiter run with a math object", () => {
+test("whole-document conversion replaces every delimiter run with a math object", async () => {
 	const editor = createEditor({
 		// The fake renders an equation as a single placeholder character, which is
 		// what the editor does, so "is the LaTeX source gone" is a real assertion.
@@ -232,7 +244,7 @@ test("whole-document conversion replaces every delimiter run with a math object"
 		]
 	});
 
-	const { result, plan } = convertAll(editor);
+	const { result, plan } = await convertAll(editor);
 
 	assert.strictEqual(plan.operations.length, 5);
 	assert.strictEqual(result.applied.length, 5);
@@ -261,20 +273,20 @@ test("whole-document conversion replaces every delimiter run with a math object"
 	assert.ok(text.includes("\\$5"), "escaped dollars must survive: " + text);
 });
 
-test("display math is switched to display mode through the logic document", () => {
+test("display math is switched to display mode through the logic document", async () => {
 	const editor = createEditor({ paragraphs: ["$$x + y$$"] });
-	convertAll(editor);
+	await convertAll(editor);
 	assert.deepStrictEqual(editor.state.displayConversions, [{ isInline: false, via: "logic-document" }]);
 	assert.strictEqual(editor.maths()[0].displayModeApplied, "logic-document");
 });
 
-test("reverse-order application keeps later offsets valid", () => {
+test("reverse-order application keeps later offsets valid", async () => {
 	// Every span changes the length of its paragraph, so applying front-to-back
 	// would corrupt the remaining offsets. The fake renders equations as their
 	// LaTeX source, so the final text shows the equation bodies in place of the
 	// delimited source.
 	const editor = createEditor({ paragraphs: ["$a$ $bcdef$ $g$"] });
-	const { result } = convertAll(editor);
+	const { result } = await convertAll(editor);
 	assert.strictEqual(result.applied.length, 3);
 	assert.deepStrictEqual(
 		editor.state.insertedMath.map((entry) => entry.latex),
@@ -286,7 +298,7 @@ test("reverse-order application keeps later offsets valid", () => {
 	assert.strictEqual(editor.text(), "a bcdef g");
 });
 
-test("the caret is moved before each insert so the equation lands inside its own span", () => {
+test("the caret is moved before each insert so the equation lands inside its own span", async () => {
 	// Regression: ApiRange.Delete() restores the document state saved when it was
 	// called, so the caret it leaves behind is the one from before the command
 	// started - typically the very top of the document. AddMathEquation() inserts
@@ -296,7 +308,7 @@ test("the caret is moved before each insert so the equation lands inside its own
 		mathRendersAsPlaceholder: true,
 		paragraphs: ["First $a$ here", "Second $b$ here"]
 	});
-	const { result } = convertAll(editor);
+	const { result } = await convertAll(editor);
 
 	assert.strictEqual(result.applied.length, 2);
 	assert.strictEqual(result.skipped.length, 0);
@@ -311,14 +323,14 @@ test("the caret is moved before each insert so the equation lands inside its own
 	assert.strictEqual(editor.text(), "First \uFFFC here\nSecond \uFFFC here");
 });
 
-test("a build that cannot move the caret leaves the document untouched", () => {
+test("a build that cannot move the caret leaves the document untouched", async () => {
 	const editor = createEditor({
 		mathRendersAsPlaceholder: true,
 		hasMoveCursorApi: false,
 		paragraphs: ["First $a$ here", "Second $b$ here"]
 	});
 	const before = editor.text();
-	const { result } = convertAll(editor);
+	const { result } = await convertAll(editor);
 
 	assert.strictEqual(result.applied.length, 0);
 	assert.strictEqual(result.skipped.length, 2);
@@ -330,7 +342,7 @@ test("a build that cannot move the caret leaves the document untouched", () => {
 	assert.strictEqual(editor.text(), before, "nothing may be rewritten without a placed caret");
 });
 
-test("an insert that leaves its source text behind stops the run", () => {
+test("an insert that leaves its source text behind stops the run", async () => {
 	// The outcome check: if the LaTeX source survives inside its own paragraph the
 	// equation went somewhere else, so the remaining spans must be left alone
 	// instead of piling more damage onto the document.
@@ -350,7 +362,7 @@ test("an insert that leaves its source text behind stops the run", () => {
 		return range;
 	};
 
-	const { result } = convertAll(editor);
+	const { result } = await convertAll(editor);
 
 	assert.deepStrictEqual(
 		result.skipped.map((entry) => entry.reason),
@@ -364,22 +376,21 @@ test("an insert that leaves its source text behind stops the run", () => {
 	);
 });
 
-test("verification pass finds no remaining delimiters", () => {
+test("verification pass finds no remaining delimiters", async () => {
 	const editor = createEditor({ paragraphs: ["One $x^2$ two", "Three $$y_3$$ four"] });
-	convertAll(editor);
-	const after = core.collectParagraphs(read(editor));
-	const remaining = core.planReplacements(after.paragraphs, PLUGIN_DEFAULTS, null);
+	await convertAll(editor);
+	const remaining = await planArithmetic(read(editor));
 	assert.deepStrictEqual(remaining.operations, []);
 });
 
-test("selection filter converts only the selected spans", () => {
+test("selection filter converts only the selected spans", async () => {
 	const editor = createEditor({ paragraphs: ["$a$ middle $b$ end $c$"] });
 	const first = "$a$".length;
 	const secondStart = first + " middle ".length;
 	const secondEnd = secondStart + "$b$".length;
 	editor.state.selection = { start: secondStart, end: secondEnd };
 
-	const { result, plan } = convertAll(editor, PLUGIN_DEFAULTS, editor.state.selection);
+	const { result, plan } = await convertAll(editor, PLUGIN_DEFAULTS, editor.state.selection);
 
 	assert.strictEqual(plan.operations.length, 1);
 	assert.strictEqual(plan.skipped.length, 2);
@@ -388,13 +399,13 @@ test("selection filter converts only the selected spans", () => {
 	assert.ok(editor.text().includes("$a$") && editor.text().includes("$c$"), editor.text());
 });
 
-test("display delimiters inside the selection still produce display math", () => {
+test("display delimiters inside the selection still produce display math", async () => {
 	// There is no "convert the selection as display math" action any more: the
 	// delimiters decide, and `$$`/`\[` mean display.
 	const editor = createEditor({ paragraphs: ["Mix $a$ and $$b$$ here"] });
 	selectAll(editor);
 
-	const { result } = convertAll(editor, PLUGIN_DEFAULTS, editor.state.selection);
+	const { result } = await convertAll(editor, PLUGIN_DEFAULTS, editor.state.selection);
 
 	assert.strictEqual(result.applied.length, 2);
 	assert.deepStrictEqual(editor.maths().map((math) => math.latex), ["a", "b"]);
@@ -406,7 +417,7 @@ test("display delimiters inside the selection still produce display math", () =>
 	assert.deepStrictEqual(editor.state.displayConversions, [{ isInline: false, via: "logic-document" }]);
 });
 
-test("paragraphs with unprovable offsets are attempted and refused per span", () => {
+test("a probe failure falls back to arithmetic and the drifted span is refused per span", async () => {
 	// Regression for the owner-reported bug: an offset that cannot be proven 1:1
 	// used to discard the whole paragraph, which silently dropped ordinary prose
 	// too (the host's `end - start` counts positions while GetText() returns
@@ -419,12 +430,22 @@ test("paragraphs with unprovable offsets are attempted and refused per span", ()
 	segments[1].unshift({ type: "image" });
 
 	const snapshot = read(editor);
-	const collected = core.collectParagraphs(snapshot);
-	assert.strictEqual(collected.unusable, 0, "an unprovable offset must not discard the paragraph");
-	assert.strictEqual(collected.paragraphs.length, 2);
-
-	const plan = core.planReplacements(collected.paragraphs, PLUGIN_DEFAULTS, null);
+	// The seam under test: the probe itself fails, so no position can be proven
+	// and every offset falls back to the arithmetic `paragraph.start +
+	// charOffset` - a failed probe is a fallback, never a refusal to plan.
+	const plan = await locate.plan(snapshot, PLUGIN_DEFAULTS, null, () =>
+		Promise.reject(new Error("probe-unavailable"))
+	);
+	assert.strictEqual(plan.unusable, 0, "an unprovable offset must not discard the paragraph");
 	assert.strictEqual(plan.operations.length, 2, "both spans are planned; the write path decides");
+	assert.deepStrictEqual(
+		plan.operations.map((op) => [op.latex, op.placement]),
+		[
+			["y", "arithmetic"],
+			["x", "arithmetic"]
+		],
+		"nothing was proven, so every placement is labelled a guess"
+	);
 
 	const result = apply(editor, plan);
 	assert.strictEqual(result.applied.length, 1);
@@ -434,10 +455,10 @@ test("paragraphs with unprovable offsets are attempted and refused per span", ()
 	assert.ok(editor.text().includes("$y$"), "the drifted paragraph keeps its source text");
 });
 
-test("a stale plan is rejected by the text-mismatch guard", () => {
+test("a stale plan is rejected by the text-mismatch guard", async () => {
 	const editor = createEditor({ paragraphs: ["Math $x$ tail"] });
 	const snapshot = read(editor);
-	const plan = core.planReplacements(core.collectParagraphs(snapshot).paragraphs, PLUGIN_DEFAULTS, null);
+	const plan = await planArithmetic(snapshot);
 
 	// Someone edits the paragraph between planning and applying.
 	editor.segments()[0][0].value = "Math  xy  tail";
@@ -449,7 +470,7 @@ test("a stale plan is rejected by the text-mismatch guard", () => {
 	assert.strictEqual(editor.maths().length, 0);
 });
 
-test("latex rejected by the editor is reported instead of silently dropped", () => {
+test("latex rejected by the editor is reported instead of silently dropped", async () => {
 	const editor = createEditor({ paragraphs: ["$   $"] });
 	// The scanner rejects empty spans, so plan by hand to test the command guard.
 	const result = apply(editor, { operations: [] });
@@ -457,14 +478,14 @@ test("latex rejected by the editor is reported instead of silently dropped", () 
 
 	const editor2 = createEditor({ paragraphs: ["$x$"] });
 	const snapshot = read(editor2);
-	const plan = core.planReplacements(core.collectParagraphs(snapshot).paragraphs, PLUGIN_DEFAULTS, null);
+	const plan = await planArithmetic(snapshot);
 	plan.operations[0].latex = "   ";
 	const result2 = apply(editor2, plan);
 	assert.strictEqual(result2.applied.length, 0);
 	assert.strictEqual(result2.skipped[0].reason, "latex-rejected");
 });
 
-test("display conversion falls back to the editor api when no current math is exposed", () => {
+test("display conversion falls back to the editor api when no current math is exposed", async () => {
 	const editor = createEditor({ paragraphs: ["$$z$$"] });
 	editor.apiDocument.Document.GetCurrentMath = function () {
 		return null;
@@ -478,15 +499,15 @@ test("display conversion falls back to the editor api when no current math is ex
 	};
 
 	const snapshot = read(editor);
-	const plan = core.planReplacements(core.collectParagraphs(snapshot).paragraphs, PLUGIN_DEFAULTS, null);
+	const plan = await planArithmetic(snapshot);
 	const result = apply(editor, plan);
 	assert.strictEqual(result.applied.length, 1);
 });
 
-test("command scope can arrive as a closure variable instead of an argument", () => {
+test("command scope can arrive as a closure variable instead of an argument", async () => {
 	const editor = createEditor({ paragraphs: ["$k$"] });
 	const snapshot = read(editor);
-	const plan = core.planReplacements(core.collectParagraphs(snapshot).paragraphs, PLUGIN_DEFAULTS, null);
+	const plan = await planArithmetic(snapshot);
 
 	// `Asc.plugin.callCommand` generates a wrapper that declares `var scope = ...`
 	// and calls the command without arguments - reproduce that shape exactly.

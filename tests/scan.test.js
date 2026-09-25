@@ -5,7 +5,7 @@ const assert = require("node:assert");
 const path = require("node:path");
 
 const core = require(path.join(__dirname, "..", "plugin", "scripts", "scan.js"));
-const { findMathSpans, planReplacements, collectParagraphs } = core;
+const { findMathSpans } = core;
 
 function latexOf(result) {
 	return result.spans.map((span) => span.latex);
@@ -215,107 +215,16 @@ test("spans with unicode text around them keep correct offsets", () => {
 	assert.strictEqual(text.substring(result.spans[0].start, result.spans[0].end), "$|x-a|<\\delta$");
 });
 
-test("planReplacements maps paragraph offsets to document offsets", () => {
-	const paragraphs = [
-		{ start: 0, text: "Intro $a$ here." },
-		{ start: 50, text: "Second $$b+c$$ line." }
-	];
-	const plan = planReplacements(paragraphs);
-	assert.deepStrictEqual(
-		plan.operations.map((op) => [op.start, op.end, op.latex, op.display]),
-		[
-			[57, 64, "b+c", true],
-			[6, 9, "a", false]
-		]
-	);
-});
-
-test("planReplacements sorts operations in reverse document order", () => {
-	const paragraphs = [
-		{ start: 0, text: "$a$ $b$ $c$" }
-	];
-	const plan = planReplacements(paragraphs);
-	const starts = plan.operations.map((op) => op.start);
-	assert.deepStrictEqual(starts, [...starts].sort((a, b) => b - a));
-});
-
-test("planReplacements honours a selection filter and reports skipped spans", () => {
-	const paragraphs = [{ start: 100, text: "$a$ middle $b$ end $c$" }];
-	const plan = planReplacements(paragraphs, null, { start: 111, end: 114 });
-	assert.deepStrictEqual(
-		plan.operations.map((op) => op.latex),
-		["b"]
-	);
-	assert.deepStrictEqual(
-		plan.skipped.map((op) => op.reason),
-		["outside-selection", "outside-selection"]
-	);
-});
-
-test("planReplacements surfaces scanner warnings with absolute offsets", () => {
-	const paragraphs = [{ start: 10, text: "bad $x" }];
-	const plan = planReplacements(paragraphs);
-	assert.strictEqual(plan.warnings.length, 1);
-	assert.strictEqual(plan.warnings[0].absoluteIndex, 14);
-	assert.strictEqual(plan.warnings[0].paragraphIndex, 0);
-});
-
 test("empty and non-string inputs are handled", () => {
 	assert.deepStrictEqual(findMathSpans("").spans, []);
 	assert.deepStrictEqual(findMathSpans(null).spans, []);
 	assert.deepStrictEqual(findMathSpans(undefined).spans, []);
-	assert.deepStrictEqual(planReplacements(null).operations, []);
 });
 
 test("scientific prose with stray dollars does not produce garbage spans", () => {
 	const text = "Cost in USD ($) is fine, and 5$ off too.";
 	const result = findMathSpans(text);
 	assert.deepStrictEqual(result.spans, []);
-});
-
-// ---------------------------------------------------------------------------
-// collectParagraphs: the offset filter that used to reject the whole document.
-//
-// The host counts positions in a paragraph range but returns characters from
-// GetText(): empty/formatting positions render as nothing and the trailing
-// paragraph mark renders as CRLF, so `end - start === text.length` is false for
-// ordinary prose too. Gating on that comparison reported "Scanned: 0 paragraphs"
-// for a document whose only content was `$$x=1$$`. Safety comes from the apply
-// step re-reading each span (see integration.test.js), not from this filter.
-// ---------------------------------------------------------------------------
-
-test("collectParagraphs keeps a paragraph whose length comparison fails", () => {
-	const snapshot = {
-		paragraphs: [
-			// Measured on onlyoffice-git 9.4.0.130: 8 content characters, 11
-			// positions, and the mark in the text.
-			{ start: 24, end: 35, text: " $$x=1$$\r\n" }
-		]
-	};
-	const collected = collectParagraphs(snapshot);
-	assert.strictEqual(collected.unusable, 0);
-	// `end` now travels too: it is the bound for the char -> position probe
-	// (REPRO row 2), and the paragraph itself is still kept.
-	assert.deepStrictEqual(collected.paragraphs, [{ start: 24, end: 35, text: " $$x=1$$\r\n" }]);
-});
-
-test("collectParagraphs still reports a paragraph that cannot be read", () => {
-	const snapshot = {
-		paragraphs: [{ start: null, end: null, text: "" }, { start: 5, text: "$a$" }]
-	};
-	const collected = collectParagraphs(snapshot);
-	assert.strictEqual(collected.unusable, 1);
-	assert.strictEqual(collected.paragraphs.length, 1);
-});
-
-test("a paragraph with an unprovable offset still yields its spans", () => {
-	const snapshot = { paragraphs: [{ start: 10, end: 40, text: "a $x$ b" }] };
-	const collected = collectParagraphs(snapshot);
-	const plan = planReplacements(collected.paragraphs);
-	assert.deepStrictEqual(
-		plan.operations.map((op) => ({ start: op.start, end: op.end, latex: op.latex, expected: op.expected })),
-		[{ start: 12, end: 15, latex: "x", expected: "$x$" }]
-	);
 });
 
 // ---------------------------------------------------------------------------

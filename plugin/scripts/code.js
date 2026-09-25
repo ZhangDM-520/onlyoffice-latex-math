@@ -6,6 +6,7 @@
  *
  * Architecture:
  *   - scan.js      pure delimiter scanner (also unit tested outside the plugin)
+ *   - locate.js    span placement: character offsets -> document positions
  *   - commands.js  self-contained command functions evaluated inside the editor
  *   - code.js      this file: settings, menus, hotkeys, orchestration, reporting
  */
@@ -14,10 +15,11 @@
 
 	var core = window.OnlyOfficeLatexMath;
 	var commands = window.OnlyOfficeLatexMathCommands;
+	var locate = window.OnlyOfficeLatexMathLocate;
 
-	if (!core || !commands) {
+	if (!core || !commands || !locate) {
 		// Loading order problem: fail loudly instead of silently doing nothing.
-		console.error("[latex-math] scan.js / commands.js missing");
+		console.error("[latex-math] scan.js / commands.js / locate.js missing");
 		return;
 	}
 
@@ -195,126 +197,15 @@
 		return callEditorCommand(commands.readCommand, {});
 	}
 
-	// Resolves char offsets inside a paragraph to real document positions. A
-	// content item can cost more positions than the characters it renders (an
-	// inline equation counts 3 positions for the 1 character its text shows), so
-	// `paragraph.start + span.start` drifts, APPLY_BODY refuses the span as
-	// `text-mismatch`, and the conversion silently does nothing - live repro
-	// row 2, measured as `Skipped (text-mismatch) @10 expected="$y$"`. The probe
-	// walks the paragraph's range and keeps the first position whose GetText()
-	// equals the requested prefix exactly; an offset that never matches (a span
-	// boundary inside a multi-character render) stays unresolved, planning falls
-	// back to the best-effort arithmetic, and the apply-time guard still
-	// protects the document behind both.
-	var RESOLVE_BODY = [
-		"var S = scopeOf(scopeArg);",
-		"var A = resolveApi();",
-		"if (!A) return JSON.stringify({ error: 'api-unavailable' });",
-		"var doc = A.GetDocument();",
-		"if (!doc) return JSON.stringify({ error: 'no-document' });",
-		"var out = [];",
-		"var specs = S.paragraphs || [];",
-		"for (var i = 0; i < specs.length; i++) {",
-		"	var spec = specs[i];",
-		"	var text = typeof spec.text === 'string' ? spec.text : '';",
-		// Paragraph text carries its mark as `\r\n`; no range ever does.
-		"	var content = text.slice(-2) === '\\r\\n' ? text.slice(0, -2) : text;",
-		"	var base = typeof spec.start === 'number' ? spec.start : -1;",
-		"	var span = typeof spec.span === 'number' ? spec.span : -1;",
-		"	var positions = {};",
-		"	var need = spec.need || [];",
-		"	if (base >= 0 && span >= 0) {",
-		"		for (var n = 0; n < need.length; n++) {",
-		// Offset 0 is the paragraph's own start: GetRange(base, base) is empty
-		// text by definition, and probing would otherwise match it one position
-		// late on a paragraph whose first content item renders as nothing.
-		"			if (need[n] === 0) positions[0] = base;",
-		"		}",
-		"		var previous = '';",
-		"		for (var q = 1; q <= span; q++) {",
-		"			var range = null;",
-		"			try { range = doc.GetRange(base, base + q); } catch (e) { range = null; }",
-		"			if (!range) break;",
-		"			var current = null;",
-		"			try { current = range.GetText(); } catch (e) { current = null; }",
-		// Rendered text must grow as a prefix; anything else means this walk
-		// cannot be trusted and the remaining offsets stay unresolved.
-		"			if (typeof current !== 'string' || current.indexOf(previous) !== 0) break;",
-		"			previous = current;",
-		"			for (var k = 0; k < need.length; k++) {",
-		"				var offset = need[k];",
-		"				if (positions[offset] === undefined && content.slice(0, offset) === current) {",
-		"					positions[offset] = base + q;",
-		"				}",
-		"			}",
-		"			if (current === content) break;",
-		"		}",
-		"	}",
-		"	out.push({ index: spec.index, positions: positions });",
-		"}",
-		"return JSON.stringify({ paragraphs: out });"
-	].join("\n");
-
-	var resolveCommand = commands.makeCommand(RESOLVE_BODY);
-
 	/**
-	 * `planReplacements`, with every span the plan would consider first resolved
-	 * to real document positions by the editor-side probe above. Two pure passes
-	 * bracket the probe: the first (unfiltered) names the paragraphs and offsets
-	 * worth resolving, the second applies the selection filter against resolved
-	 * positions - so a precisely selected span inside a drifted paragraph is no
-	 * longer filtered out by arithmetic that never matched the document. A failed
-	 * probe leaves no map behind and the second pass reproduces today's
-	 * best-effort plan exactly.
+	 * The adapter at locate.js's seam: runs the editor-side probe (commands.js
+	 * `resolveCommand`) and hands locate.js its per-paragraph
+	 * `{index, positions}` entries. How a char offset becomes a position is
+	 * owned behind locate.js; this function only knows how to ask the editor.
 	 */
-	function buildPlan(collected, filter) {
-		var paragraphs = collected.paragraphs;
-		var first = core.planReplacements(paragraphs, scannerOptions(), null);
-		if (!first.operations.length) {
-			// No span anywhere: a filtered pass cannot produce operations either
-			// (a filter only moves them out), so the probe is not worth a round
-			// trip. `skipped` stays empty for the same reason - there is nothing
-			// to skip.
-			return Promise.resolve(first);
-		}
-		var specs = [];
-		var byParagraph = {};
-		first.operations.forEach(function (op) {
-			var paragraph = paragraphs[op.paragraphIndex];
-			if (!paragraph) {
-				return;
-			}
-			var spec = byParagraph[op.paragraphIndex];
-			if (!spec) {
-				spec = {
-					index: op.paragraphIndex,
-					start: paragraph.start,
-					span: typeof paragraph.end === "number" ? paragraph.end - paragraph.start : -1,
-					text: paragraph.text,
-					need: []
-				};
-				byParagraph[op.paragraphIndex] = spec;
-				specs.push(spec);
-			}
-			spec.need.push(op.start - paragraph.start);
-			spec.need.push(op.end - paragraph.start);
-		});
-		specs.forEach(function (spec) {
-			spec.need = spec.need.filter(function (offset, index, all) {
-				return all.indexOf(offset) === index;
-			});
-		});
-		return callEditorCommand(resolveCommand, { paragraphs: specs }).then(function (resolved) {
-			((resolved && resolved.paragraphs) || []).forEach(function (item) {
-				if (!item || typeof item.index !== "number") {
-					return;
-				}
-				var paragraph = paragraphs[item.index];
-				if (paragraph && item.positions && typeof item.positions === "object") {
-					paragraph.positions = item.positions;
-				}
-			});
-			return core.planReplacements(paragraphs, scannerOptions(), filter);
+	function resolveSpanPositions(specs) {
+		return callEditorCommand(commands.resolveCommand, { paragraphs: specs }).then(function (result) {
+			return (result && result.paragraphs) || [];
 		});
 	}
 
@@ -461,11 +352,10 @@
 					return report;
 				}
 
-				var collected = core.collectParagraphs(snapshot);
 				// Plan only after the char -> position probe has answered; the
 				// big block below runs against the resolved plan.
-				return buildPlan(collected, selection).then(function (plan) {
-					return { collected: collected, selection: selection, plan: plan };
+				return locate.plan(snapshot, scannerOptions(), selection, resolveSpanPositions).then(function (plan) {
+					return { snapshot: snapshot, selection: selection, plan: plan };
 				});
 			})
 			.then(function (stage) {
@@ -474,15 +364,18 @@
 					// collapsed selection): that value is already the final report.
 					return stage;
 				}
-				var collected = stage.collected;
 				var selection = stage.selection;
 				var plan = stage.plan;
+				// locate.plan reports only what could not be read, and
+				// collectParagraphs counts every snapshot paragraph either
+				// readable or unusable - so the scanned count is the difference.
+				var scanned = ((stage.snapshot && stage.snapshot.paragraphs) || []).length - plan.unusable;
 
 				reportLine(
 					report,
 					tr("Scanned") +
 						": " +
-						collected.paragraphs.length +
+						scanned +
 						" " +
 						tr("paragraphs") +
 						", " +
@@ -498,10 +391,10 @@
 						")"
 				);
 
-				if (collected.unusable > 0) {
+				if (plan.unusable > 0) {
 					reportLine(
 						report,
-						tr("Paragraphs that could not be read") + ": " + collected.unusable
+						tr("Paragraphs that could not be read") + ": " + plan.unusable
 					);
 				}
 				if (plan.skipped.length > 0) {
@@ -596,8 +489,7 @@
 				reportLine(report, tr("Verification unavailable") + ": " + ((snapshot && snapshot.error) || "no response"));
 				return;
 			}
-			var collected = core.collectParagraphs(snapshot);
-			return buildPlan(collected, filter).then(function (plan) {
+			return locate.plan(snapshot, scannerOptions(), filter, resolveSpanPositions).then(function (plan) {
 				reportLine(report, tr("Delimiters still present") + ": " + plan.operations.length);
 				if (plan.operations.length === 0 && report.converted > 0) {
 					reportLine(report, tr("All converted spans became native math objects."));

@@ -14,6 +14,7 @@ var vm = require("node:vm");
 
 var core = require(path.join(__dirname, "..", "plugin", "scripts", "scan.js"));
 var commands = require(path.join(__dirname, "..", "plugin", "scripts", "commands.js"));
+var locate = require(path.join(__dirname, "..", "plugin", "scripts", "locate.js"));
 
 var CODE_SOURCE = fs.readFileSync(path.join(__dirname, "..", "plugin", "scripts", "code.js"), "utf8");
 
@@ -316,7 +317,8 @@ function createHarness(editor, options) {
 		clearTimeout: clearTimeout,
 		console: console,
 		OnlyOfficeLatexMath: core,
-		OnlyOfficeLatexMathCommands: commands
+		OnlyOfficeLatexMathCommands: commands,
+		OnlyOfficeLatexMathLocate: locate
 	};
 	windowStub.window = windowStub;
 

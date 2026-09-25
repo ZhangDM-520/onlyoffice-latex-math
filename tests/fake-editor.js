@@ -25,7 +25,7 @@ var PARAGRAPH_MARK_COST = 1;
 // The host's ApiParagraph.GetText() renders the trailing paragraph mark as CRLF
 // while the paragraph's range counts that mark as a single position. The range
 // span and the text length therefore never agree, which is why the offset mapping
-// has to be verified per span at apply time (see scan.js collectParagraphs).
+// has to be verified per span at apply time (see locate.js collectParagraphs).
 // Measured live on onlyoffice-git 9.4.0.130:
 // an empty paragraph gave `end - start === 3` with `text === "\r\n"`, and a
 // paragraph holding ` $$x=1$$` gave 11 positions for 8 content characters plus

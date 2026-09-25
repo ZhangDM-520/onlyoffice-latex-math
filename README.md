@@ -193,26 +193,28 @@ goes missing.
 ## Tests
 
 ```bash
-node --test tests/          # the full suite: scanner, icons, hotkeys, harness, integration, report, rule map
+node --test tests/          # the full suite: scanner, placement, icons, hotkeys, harness, integration, report, rule map
 ```
 
 ### Code map
 
-The chain a conversion travels: `code.js` (orchestration) → `scan.js` (pure scanner) →
-`commands.js` (editor-page commands) — with `report.js` as the report window's own page script.
+The chain a conversion travels: `code.js` (orchestration) → `locate.js` (span placement) →
+`scan.js` (pure scanner) → `commands.js` (editor-page commands) — with `report.js` as the report
+window's own page script.
 
 | File | Lines | What it owns |
 | :--- | ---: | :--- |
-| `plugin/scripts/scan.js` | ~650 | The pure core: delimiter rules, pairing decisions (`closerIsAlsoAnOpener`, `refusedDollarIsAnOpener`, owned by `docs/adr/0001-dollar-pairing.md`), span and offset planning. No editor API calls, fully testable headlessly. |
-| `plugin/scripts/code.js` | ~1230 | Everything else: settings, menu publication, hotkeys, the editor-command bridge, `convertSelection` (read → plan → apply → verify → report), report windows. Not "thin glue" — it is the majority of the plugin and the file to open first when behaviour surprises you. |
-| `plugin/scripts/commands.js` | ~200 | Self-contained command bodies compiled by `makeCommand` from string sources against a shared `PRELUDE` and run through `Asc.plugin.callCommand`. Holds the `text-mismatch` safety net. |
+| `plugin/scripts/scan.js` | ~450 | The pure core: delimiter rules, pairing decisions (`closerIsAlsoAnOpener`, `refusedDollarIsAnOpener`, owned by `docs/adr/0001-dollar-pairing.md`), span detection in the character domain — paragraph-relative offsets only, never document positions. No editor API calls, fully testable headlessly. |
+| `plugin/scripts/locate.js` | ~370 | Span placement, and the only owner of char offset ↔ document position. `plan()` brackets the editor-side probe (the `resolve` seam) with two pure passes, falls back to arithmetic where nothing was proven, verifies every probe map before believing it (`verifiedPositions`), and tags each operation `placement: "probed"\|"arithmetic"`. |
+| `plugin/scripts/code.js` | ~1120 | Everything else: settings, menu publication, hotkeys, the editor-command bridge, `convertSelection` (read → plan → apply → verify → report), report windows. Not "thin glue" — it is the majority of the plugin and the file to open first when behaviour surprises you. |
+| `plugin/scripts/commands.js` | ~260 | Self-contained command bodies compiled by `makeCommand` from string sources against a shared `PRELUDE` and run through `Asc.plugin.callCommand`. Holds the `text-mismatch` safety net (`APPLY_BODY`) and the char → position probe (`RESOLVE_BODY`). |
 | `plugin/scripts/report.js` | ~150 | The report window's page script: URL payload decoding, copy-to-clipboard, close protocol. Deep for its size — it hides real host quirks. |
 
 **The one structural fact to know before touching offsets:** a paragraph's document range counts
 **positions**, while `GetText()` returns **characters** (plus the paragraph mark as CRLF), and an
 inline equation object costs 3 positions for the 1 character it renders. They are two coordinate
-systems; `planReplacements` works in characters, the editor works in positions, and the probe in
-`code.js` (`RESOLVE_BODY`) maps between them. Never compare `end - start` with `text.length`
+systems; `scan.js` works in characters, the editor works in positions, and `locate.js` owns the
+translation between them — its header is the map. Never compare `end - start` with `text.length`
 (details and measurements in `docs/NOTE.md` §1.7).
 
 Tests mirror the host's *gates*, not just its API surface (`tests/plugin-harness.js`,

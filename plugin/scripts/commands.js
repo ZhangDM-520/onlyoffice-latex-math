@@ -116,7 +116,7 @@
 		// (interior ones render as empty text, the paragraph mark renders as two
 		// characters), so a range span never equals the text length and any
 		// comparison between them is meaningless - the write path does not gate on
-		// offsets at all (see scan.js collectParagraphs and APPLY_BODY's
+		// offsets at all (see locate.js collectParagraphs and APPLY_BODY's
 		// text-mismatch guard).
 		"	out.push({ start: start, end: end, text: text });",
 		"}",
@@ -187,10 +187,71 @@
 		"return JSON.stringify({ applied: applied, skipped: skipped, historyPoint: history, displayMode: displayMode });"
 	].join("\n");
 
+	// Resolves char offsets inside a paragraph to real document positions. A
+	// content item can cost more positions than the characters it renders (an
+	// inline equation counts 3 positions for the 1 character its text shows), so
+	// `paragraph.start + span.start` drifts, APPLY_BODY refuses the span as
+	// `text-mismatch`, and the conversion silently does nothing - live repro
+	// row 2, measured as `Skipped (text-mismatch) @10 expected="$y$"`. The probe
+	// walks the paragraph's range and keeps the first position whose GetText()
+	// equals the requested prefix exactly; an offset that never matches (a span
+	// boundary inside a multi-character render) stays unresolved, planning falls
+	// back to the best-effort arithmetic, and the apply-time guard still
+	// protects the document behind both.
+	var RESOLVE_BODY = [
+		"var S = scopeOf(scopeArg);",
+		"var A = resolveApi();",
+		"if (!A) return JSON.stringify({ error: 'api-unavailable' });",
+		"var doc = A.GetDocument();",
+		"if (!doc) return JSON.stringify({ error: 'no-document' });",
+		"var out = [];",
+		"var specs = S.paragraphs || [];",
+		"for (var i = 0; i < specs.length; i++) {",
+		"	var spec = specs[i];",
+		"	var text = typeof spec.text === 'string' ? spec.text : '';",
+		// Paragraph text carries its mark as `\r\n`; no range ever does.
+		"	var content = text.slice(-2) === '\\r\\n' ? text.slice(0, -2) : text;",
+		"	var base = typeof spec.start === 'number' ? spec.start : -1;",
+		"	var span = typeof spec.span === 'number' ? spec.span : -1;",
+		"	var positions = {};",
+		"	var need = spec.need || [];",
+		"	if (base >= 0 && span >= 0) {",
+		"		for (var n = 0; n < need.length; n++) {",
+		// Offset 0 is the paragraph's own start: GetRange(base, base) is empty
+		// text by definition, and probing would otherwise match it one position
+		// late on a paragraph whose first content item renders as nothing.
+		"			if (need[n] === 0) positions[0] = base;",
+		"		}",
+		"		var previous = '';",
+		"		for (var q = 1; q <= span; q++) {",
+		"			var range = null;",
+		"			try { range = doc.GetRange(base, base + q); } catch (e) { range = null; }",
+		"			if (!range) break;",
+		"			var current = null;",
+		"			try { current = range.GetText(); } catch (e) { current = null; }",
+		// Rendered text must grow as a prefix; anything else means this walk
+		// cannot be trusted and the remaining offsets stay unresolved.
+		"			if (typeof current !== 'string' || current.indexOf(previous) !== 0) break;",
+		"			previous = current;",
+		"			for (var k = 0; k < need.length; k++) {",
+		"				var offset = need[k];",
+		"				if (positions[offset] === undefined && content.slice(0, offset) === current) {",
+		"					positions[offset] = base + q;",
+		"				}",
+		"			}",
+		"			if (current === content) break;",
+		"		}",
+		"	}",
+		"	out.push({ index: spec.index, positions: positions });",
+		"}",
+		"return JSON.stringify({ paragraphs: out });"
+	].join("\n");
+
 	return {
 		makeCommand: makeCommand,
 		readCommand: makeCommand(READ_BODY),
 		applyCommand: makeCommand(APPLY_BODY),
+		resolveCommand: makeCommand(RESOLVE_BODY),
 		PRELUDE: PRELUDE
 	};
 });
