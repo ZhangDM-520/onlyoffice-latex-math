@@ -37,7 +37,7 @@
  *     out of its own URL and binds the button unconditionally - a check made
  *     at parse time hid the button for real users.
  *
- * Out of this interface on purpose: report *authoring* (code.js
+ * Out of this interface on purpose: report *authoring* (report-text.js
  * `reportLine`/`summarizeSkipped` - conversion wording, not record shape) and
  * the page's realm-specific behaviour (report.js `copyText`/`closeSelf`).
  */

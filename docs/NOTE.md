@@ -362,6 +362,21 @@ from Node over the CDP websocket. Frame contexts:
   means N children passed the checker gate) and `_events.onToolbarMenu`/`AddToolbarMenuItem` for the
   ribbon, where `items` is the flat list of the tab. The harness mirrors both
   (`composeContextMenu`/`composeToolbar`), but only the live host proves the wiring.
+* **Host drift after a DesktopEditors upgrade** — the test doubles carry `MIRROR(...)` stamps against
+  the host contract recorded in their file headers, but a stamp cannot notice an upgrade. The manual
+  anchor probe: grep the installed host source for the minifier-stable literals the mirrors encode.
+  If one is gone, the mirror is lying and the tagged site is what to re-measure:
+
+  ```bash
+  B=/opt/onlyoffice/desktopeditors/editors/sdkjs-plugins
+  grep -c '"All"===' "$B/v1/plugins.js"        # the context-menu checker gate
+  grep -c 'CloseWindow' "$B/v1/plugins.js"     # PluginWindow.close routing
+  grep -c 'null===this.parent' "$B/pluginBase.js"  # toToolbar root-becomes-tab
+  grep -c 'items' "$B/pluginBase.js"           # toItem emits items only with children
+  ```
+
+  Checklist first; promote to `tools/check-host-drift.js` only after a second silent-drift incident
+  proves the checklist is not being run.
 * **Icon set drift**: `python3 tools/make-icons.py` regenerates *and* prunes — it deletes anything under
   `plugin/resources/` that the manifest no longer owns, because `--check` iterates the manifest and can
   therefore never see a retired slot's leftovers (40 of them, after the ribbon was reduced to settings).
