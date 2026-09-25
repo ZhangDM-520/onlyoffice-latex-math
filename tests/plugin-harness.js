@@ -13,10 +13,15 @@ var path = require("node:path");
 var vm = require("node:vm");
 
 var core = require(path.join(__dirname, "..", "plugin", "scripts", "scan.js"));
-var commands = require(path.join(__dirname, "..", "plugin", "scripts", "commands.js"));
 var locate = require(path.join(__dirname, "..", "plugin", "scripts", "locate.js"));
 
 var CODE_SOURCE = fs.readFileSync(path.join(__dirname, "..", "plugin", "scripts", "code.js"), "utf8");
+// commands.js is loaded the way production loads it - inside the fake plugin
+// frame - because its `run` seam reaches the host through the UMD root, which
+// must be that frame's `window`/`self`. The pure modules above are ordinary
+// Node requires; the compiled command bodies can also be driven directly from
+// the test realm (see tests/integration.test.js).
+var COMMANDS_SOURCE = fs.readFileSync(path.join(__dirname, "..", "plugin", "scripts", "commands.js"), "utf8");
 
 function createStorage() {
 	var data = {};
@@ -48,6 +53,9 @@ function createHarness(editor, options) {
 	options = options || {};
 
 	var context = {};
+	// `commandOverlaps` fires once per harness: the knob models one overlap
+	// event (a second conversion re-entering `run` before the first answers).
+	var overlapped = false;
 	var harness = {
 		roots: [],
 		contextMenus: [],
@@ -206,6 +214,35 @@ function createHarness(editor, options) {
 		return { tabs: tabs };
 	};
 
+	// Every timer the fake window arms is recorded, so a test can tell a
+	// cleared backstop from an orphaned one (the command timeout is armed
+	// before `callCommand` and must be cleared by the first answer).
+	var timers = [];
+	harness.timers = timers;
+	function setTimer(handler, delay) {
+		var record = { delay: delay, cleared: false, fired: false, handle: null };
+		timers.push(record);
+		record.handle = setTimeout(function () {
+			record.fired = true;
+			handler();
+		}, delay);
+		// Pending timers (the command timeout, the publish backstop) must not
+		// keep the test process alive, hence unref - they still fire while the
+		// loop is busy with other tests.
+		if (record.handle && typeof record.handle.unref === "function") {
+			record.handle.unref();
+		}
+		return record.handle;
+	}
+	function clearTimer(handle) {
+		timers.forEach(function (record) {
+			if (record.handle === handle) {
+				record.cleared = true;
+			}
+		});
+		clearTimeout(handle);
+	}
+
 	function PluginWindow() {
 		var self = this;
 		// The real host generates a uuid per PluginWindow instance, so a fresh
@@ -237,10 +274,17 @@ function createHarness(editor, options) {
 				return text;
 			},
 			executeMethod: function () {},
-			// CONVENIENT (async seam collapsed to sync): the real host answers
-			// callCommand asynchronously; collapsing the seam here lets tests assert
-			// state immediately after an action. Behaviour of the command itself is
-			// unchanged.
+			// FAITHFUL(async seam): the real host answers callCommand
+			// asynchronously and evaluates the command in the editor page at
+			// some later point - reading the shared `Asc.scope` payload slot at
+			// *evaluation* time, which is exactly what lets a second run in
+			// flight swap payloads. The harness therefore defers both the
+			// evaluation and the callback (a microtask by default, `commandDelay`
+			// ms when asked) and reads `Asc.scope` only when the command runs.
+			// Knobs for the seam's failure shapes: `commandDelay`,
+			// `commandNeverAnswers`, `commandRaw` (answer with a raw string),
+			// `commandOverlaps` (re-enter `run` before this command answers,
+			// once per harness).
 			// The real host stringifies the command and evaluates it inside the
 			// editor page, so the harness recompiles the source in the simulated
 			// editor realm instead of calling it in the test realm.
@@ -248,24 +292,41 @@ function createHarness(editor, options) {
 				harness.executedCommands.push({ isClose: isClose, isCalc: isCalc });
 				// A host whose editor is still loading never answers; used to
 				// reproduce the startup window in which menu registration is
-				// dropped.
-				if (options.editorReady === false) {
+				// dropped. `commandNeverAnswers` is the same shape on demand.
+				if (options.editorReady === false || options.commandNeverAnswers) {
 					return;
 				}
-				context.__scope = Asc.scope || {};
-				var wrapper =
-					"(function () { var Asc = {}; Asc.scope = __scope; var scope = Asc.scope; return (" +
-					commandFn.toString() +
-					")(); })()";
-				var result;
-				try {
-					result = vm.runInContext(wrapper, context, { filename: "command.js" });
-				} catch (error) {
-					harness.errors.push(error);
-					result = JSON.stringify({ error: "threw: " + error.message });
+				if (typeof options.commandOverlaps === "function" && !overlapped) {
+					overlapped = true;
+					options.commandOverlaps();
 				}
-				if (typeof callback === "function") {
-					callback(result);
+				function deliver() {
+					if (options.commandRaw !== undefined) {
+						if (typeof callback === "function") {
+							callback(options.commandRaw);
+						}
+						return;
+					}
+					context.__scope = Asc.scope || {};
+					var wrapper =
+						"(function () { var Asc = {}; Asc.scope = __scope; var scope = Asc.scope; return (" +
+						commandFn.toString() +
+						")(); })()";
+					var result;
+					try {
+						result = vm.runInContext(wrapper, context, { filename: "command.js" });
+					} catch (error) {
+						harness.errors.push(error);
+						result = JSON.stringify({ error: "threw: " + error.message });
+					}
+					if (typeof callback === "function") {
+						callback(result);
+					}
+				}
+				if (typeof options.commandDelay === "number") {
+					setTimer(deliver, options.commandDelay);
+				} else {
+					Promise.resolve().then(deliver);
 				}
 			}
 		},
@@ -304,20 +365,13 @@ function createHarness(editor, options) {
 		localStorage: createStorage(),
 		document: { getElementById: createWindowElement, addEventListener: function () {} },
 		navigator: {},
-		// Pending timers (the command timeout, the publish backstop) must not keep
-		// the test process alive, hence unref - they still fire while the loop is
-		// busy with other tests.
-		setTimeout: function (handler, delay) {
-			var timer = setTimeout(handler, delay);
-			if (timer && typeof timer.unref === "function") {
-				timer.unref();
-			}
-			return timer;
-		},
-		clearTimeout: clearTimeout,
+		// Pending timers (the command timeout, the publish backstop) are tracked
+		// in `harness.timers` and unref'd so they cannot keep the test process
+		// alive - they still fire while the loop is busy with other tests.
+		setTimeout: setTimer,
+		clearTimeout: clearTimer,
 		console: console,
 		OnlyOfficeLatexMath: core,
-		OnlyOfficeLatexMathCommands: commands,
 		OnlyOfficeLatexMathLocate: locate
 	};
 	windowStub.window = windowStub;
@@ -456,6 +510,7 @@ function createHarness(editor, options) {
 	context.Array = Array;
 
 	vm.createContext(context);
+	vm.runInContext(COMMANDS_SOURCE, context, { filename: "commands.js" });
 	vm.runInContext(CODE_SOURCE, context, { filename: "code.js" });
 
 	return {
@@ -481,6 +536,12 @@ function createHarness(editor, options) {
 		// There is one conversion and it always acts on the selection.
 		convertSelection: function () {
 			return windowStub.OnlyOfficeLatexMathApi.convertSelection();
+		},
+		// The seam under test: `run` is the only way plugin code reaches the
+		// editor page. `timeoutMs` overrides the 30 s backstop so timeout paths
+		// cost milliseconds.
+		runCommand: function (name, payload, timeoutMs) {
+			return windowStub.OnlyOfficeLatexMathCommands.run(name, payload, timeoutMs);
 		},
 		composeToolbar: function () {
 			return harness.composeToolbar();

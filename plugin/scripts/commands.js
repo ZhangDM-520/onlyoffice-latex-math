@@ -1,5 +1,7 @@
 /*
- * Command builders for the `$...$` -> ONLYOFFICE math conversion.
+ * The whole "run this in the editor page" seam for the `$...$` -> ONLYOFFICE
+ * math conversion: the command bodies, and `run`, the one way the plugin
+ * frame puts one of them into the editor page and gets an answer back.
  *
  * `Asc.plugin.callCommand` stringifies the function it is given and evaluates it
  * inside the *editor page*, so a command function cannot close over anything
@@ -10,14 +12,20 @@
  *
  * Every command returns a JSON string, because `Asc.checkReturnCommand` drops
  * complex objects on the way back to the plugin iframe.
+ *
+ * Callers of this module know only: a command name, a JSON payload, the parsed
+ * result and the error taxonomy (`timeout`, `unparsable-command-result`,
+ * `clobbered`, `callCommand-unavailable`, `callCommand-threw: …`). Out of the
+ * interface: the prelude and its helpers, the `Asc.scope` payload slot, and the
+ * backstop timer - all seam internals.
  */
 (function (root, factory) {
 	if (typeof module === "object" && module.exports) {
-		module.exports = factory();
+		module.exports = factory(root);
 	} else {
-		root.OnlyOfficeLatexMathCommands = factory();
+		root.OnlyOfficeLatexMathCommands = factory(root);
 	}
-})(typeof self !== "undefined" ? self : this, function () {
+})(typeof self !== "undefined" ? self : this, function (root) {
 	"use strict";
 
 	// Helpers shared by every editor-page command.
@@ -95,6 +103,30 @@
 	function makeCommand(bodySource) {
 		// eslint-disable-next-line no-new-func
 		return new Function("return function (scopeArg) {\n" + PRELUDE + "\n" + bodySource + "\n};")();
+	}
+
+	// The editor answers callCommand asynchronously; without a backstop a
+	// dropped callback would leave the UI waiting forever. `run`'s third
+	// argument overrides it, which is how the timeout paths are tested without
+	// waiting 30 s.
+	var COMMAND_TIMEOUT_MS = 30000;
+
+	// Every command answers with a JSON string. A string that does not parse is
+	// named (`unparsable-command-result`) and kept raw for the report; a
+	// callback that carries nothing at all, or no callback, is the "no
+	// response" this seam has always reported and the taxonomy names `timeout`.
+	function parseCommandResult(result) {
+		if (typeof result === "string" && result !== "") {
+			try {
+				return JSON.parse(result);
+			} catch (e) {
+				return { error: "unparsable-command-result", raw: result };
+			}
+		}
+		if (result && typeof result === "object") {
+			return result;
+		}
+		return null;
 	}
 
 	var READ_BODY = [
@@ -247,11 +279,123 @@
 		"return JSON.stringify({ paragraphs: out });"
 	].join("\n");
 
+	// A trivial command that only the live editor can answer; its answer proves
+	// the document is loaded (code.js uses it as the menu-publication signal).
+	var PROBE_BODY = ["return JSON.stringify({ latexMathProbe: true });"].join("\n");
+
+	var RUNNERS = {
+		read: makeCommand(READ_BODY),
+		apply: makeCommand(APPLY_BODY),
+		resolve: makeCommand(RESOLVE_BODY),
+		probe: makeCommand(PROBE_BODY)
+	};
+
+	// Runs are serialised: one command is in flight and later runs queue
+	// behind it. The payload rides ONE shared slot (`Asc.scope`), so two
+	// commands in flight at once swap payloads - measured live (two overlapping
+	// conversions answered `unparsable-command-result` / `no response from
+	// editor`). Queueing keeps every answer paired with the payload its own
+	// run put in the slot. The alternative is fail-fast supersede (a new run
+	// displaces the in-flight one, which settles `clobbered`): a fresh click
+	// would start immediately instead of waiting, but the displaced caller
+	// gets an error and the displaced command may still read the superseding
+	// run's payload. Queueing chooses "every caller keeps its own answer" over
+	// "the newest run starts now" - a run queued behind a hung one waits out
+	// that run's timeout before its own round trip begins.
+	var inFlight = null;
+	var waiting = [];
+
+	/**
+	 * Run one command in the editor page. Resolves with the parsed JSON result,
+	 * or `{error: …}` from the seam's taxonomy. `timeoutMs` overrides the
+	 * backstop for tests.
+	 */
+	function run(name, payload, timeoutMs) {
+		var command = RUNNERS[name];
+		if (!command) {
+			// A caller-side programming error, not a seam failure: there is no
+			// honest error code for asking the editor something unknowable.
+			throw new Error("unknown editor command: " + name);
+		}
+		return new Promise(function (resolve) {
+			waiting.push({
+				command: command,
+				payload: payload || {},
+				timeoutMs: typeof timeoutMs === "number" ? timeoutMs : COMMAND_TIMEOUT_MS,
+				resolve: resolve,
+				settled: false,
+				timer: null
+			});
+			pump();
+		});
+	}
+
+	function pump() {
+		if (inFlight || waiting.length === 0) {
+			return;
+		}
+		var entry = waiting.shift();
+		inFlight = entry;
+		dispatch(entry);
+	}
+
+	function dispatch(entry) {
+		// The UMD root is the plugin frame's `window` (or `self`) wherever this
+		// module is loaded; the host bridge lives there.
+		var plugin = root.Asc && root.Asc.plugin;
+		if (!plugin || typeof plugin.callCommand !== "function") {
+			finish(entry, { error: "callCommand-unavailable" });
+			return;
+		}
+		try {
+			// The generated command wrapper reads the payload from Asc.scope.
+			root.Asc.scope = entry.payload;
+			// Arm the backstop before dispatching: a host that answers
+			// synchronously would otherwise leave the timer orphaned.
+			entry.timer = root.setTimeout(function () {
+				finish(entry, { error: "timeout" });
+			}, entry.timeoutMs);
+			plugin.callCommand(entry.command, false, true, function (value) {
+				if (entry.settled) {
+					// A superseded or duplicated late callback settles as
+					// `clobbered` and is discarded: the guard in `finish` is
+					// what drops it, so a late answer can neither revive a
+					// finished run nor leak into the run that owns the slot
+					// now. Under the queueing policy above no caller ever
+					// observes `clobbered`; it is the displaced run's answer
+					// under the fail-fast alternative.
+					finish(entry, { error: "clobbered" });
+					return;
+				}
+				finish(entry, parseCommandResult(value) || { error: "timeout" });
+			});
+		} catch (e) {
+			finish(entry, { error: "callCommand-threw: " + (e && e.message) });
+		}
+	}
+
+	function finish(entry, result) {
+		if (entry.settled) {
+			return;
+		}
+		entry.settled = true;
+		if (entry.timer !== null) {
+			root.clearTimeout(entry.timer);
+			entry.timer = null;
+		}
+		inFlight = null;
+		entry.resolve(result);
+		pump();
+	}
+
 	return {
-		makeCommand: makeCommand,
-		readCommand: makeCommand(READ_BODY),
-		applyCommand: makeCommand(APPLY_BODY),
-		resolveCommand: makeCommand(RESOLVE_BODY),
-		PRELUDE: PRELUDE
+		run: run,
+		// The compiled commands stay exported for tests that drive one body
+		// directly (the VM-recompile tests wrap `toString()` themselves).
+		// Plugin code goes through `run`.
+		readCommand: RUNNERS.read,
+		applyCommand: RUNNERS.apply,
+		resolveCommand: RUNNERS.resolve,
+		probeCommand: RUNNERS.probe
 	};
 });

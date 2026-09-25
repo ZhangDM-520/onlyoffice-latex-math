@@ -7,7 +7,8 @@
  * Architecture:
  *   - scan.js      pure delimiter scanner (also unit tested outside the plugin)
  *   - locate.js    span placement: character offsets -> document positions
- *   - commands.js  self-contained command functions evaluated inside the editor
+ *   - commands.js  editor-page command bodies and the `run` seam that executes
+ *                  them (payload handoff, answer parsing, timeout taxonomy)
  *   - code.js      this file: settings, menus, hotkeys, orchestration, reporting
  */
 (function (window) {
@@ -26,9 +27,6 @@
 	var SETTINGS_KEY = "onlyoffice-latex-math.settings";
 	// Bumped when a stored default must not survive: 2 silenced the report window.
 	var SETTINGS_VERSION = 2;
-	// The editor answers callCommand asynchronously; without a backstop a dropped
-	// callback would leave the UI waiting forever.
-	var COMMAND_TIMEOUT_MS = 30000;
 	// Upper bound on how long the plugin waits for the host to confirm that the
 	// editor shell is up before publishing the menus anyway.
 	var PUBLISH_BACKSTOP_MS = 1500;
@@ -137,74 +135,29 @@
 	 * Editor bridge
 	 * ------------------------------------------------------------------ */
 
-	function parseCommandResult(result) {
-		if (typeof result === "string" && result !== "") {
-			try {
-				return JSON.parse(result);
-			} catch (e) {
-				return { error: "unparsable-command-result", raw: result };
-			}
+	// The seam (commands.js `run`) names its failures (`timeout`,
+	// `unparsable-command-result`, …); the report keeps the wording owners have
+	// read since the first builds - a dropped answer has always printed "no
+	// response from editor" here and it still does, it just has a name now.
+	function commandFailureText(result, noAnswerText) {
+		if (!result || result.error === "timeout") {
+			return noAnswerText;
 		}
-		if (result && typeof result === "object") {
-			return result;
-		}
-		return null;
-	}
-
-	/**
-	 * Run one of the self-contained command functions inside the editor page.
-	 * Resolves with the parsed JSON result, or `null` when the host never
-	 * delivered a callback.
-	 */
-	function callEditorCommand(commandFn, scope) {
-		return new Promise(function (resolve) {
-			var plugin = window.Asc && window.Asc.plugin;
-			if (!plugin || typeof plugin.callCommand !== "function") {
-				resolve({ error: "callCommand-unavailable" });
-				return;
-			}
-
-			var settled = false;
-			var timer = null;
-			function settle(value) {
-				if (settled) {
-					return;
-				}
-				settled = true;
-				if (timer !== null) {
-					window.clearTimeout(timer);
-					timer = null;
-				}
-				resolve(parseCommandResult(value));
-			}
-
-			try {
-				// The generated command wrapper reads the payload from Asc.scope.
-				window.Asc.scope = scope || {};
-				// Arm the backstop before dispatching: a host that answers
-				// synchronously would otherwise leave the timer orphaned.
-				timer = window.setTimeout(function () {
-					settle(null);
-				}, COMMAND_TIMEOUT_MS);
-				plugin.callCommand(commandFn, false, true, settle);
-			} catch (e) {
-				settle({ error: "callCommand-threw: " + (e && e.message) });
-			}
-		});
+		return result.error;
 	}
 
 	function readDocument() {
-		return callEditorCommand(commands.readCommand, {});
+		return commands.run("read", {});
 	}
 
 	/**
 	 * The adapter at locate.js's seam: runs the editor-side probe (commands.js
-	 * `resolveCommand`) and hands locate.js its per-paragraph
+	 * `resolve`) and hands locate.js its per-paragraph
 	 * `{index, positions}` entries. How a char offset becomes a position is
 	 * owned behind locate.js; this function only knows how to ask the editor.
 	 */
 	function resolveSpanPositions(specs) {
-		return callEditorCommand(commands.resolveCommand, { paragraphs: specs }).then(function (result) {
+		return commands.run("resolve", { paragraphs: specs }).then(function (result) {
 			return (result && result.paragraphs) || [];
 		});
 	}
@@ -335,7 +288,7 @@
 				if (!snapshot || snapshot.error) {
 					reportLine(
 						report,
-						tr("Cannot read the document") + ": " + ((snapshot && snapshot.error) || "no response from editor")
+						tr("Cannot read the document") + ": " + commandFailureText(snapshot, "no response from editor")
 					);
 					showReport(report);
 					return report;
@@ -425,14 +378,14 @@
 					return report;
 				}
 
-				return callEditorCommand(commands.applyCommand, {
+				return commands.run("apply", {
 					operations: plan.operations,
 					createHistoryPoint: true
 				}).then(function (result) {
 					if (!result || result.error) {
 						reportLine(
 							report,
-							tr("Conversion failed") + ": " + ((result && result.error) || "no response from editor")
+							tr("Conversion failed") + ": " + commandFailureText(result, "no response from editor")
 						);
 						showReport(report);
 						return report;
@@ -486,7 +439,7 @@
 	function verify(report, filter) {
 		return readDocument().then(function (snapshot) {
 			if (!snapshot || snapshot.error) {
-				reportLine(report, tr("Verification unavailable") + ": " + ((snapshot && snapshot.error) || "no response"));
+				reportLine(report, tr("Verification unavailable") + ": " + commandFailureText(snapshot, "no response"));
 				return;
 			}
 			return locate.plan(snapshot, scannerOptions(), filter, resolveSpanPositions).then(function (plan) {
@@ -1025,12 +978,11 @@
 		}, PUBLISH_BACKSTOP_MS);
 	}
 
-	// A trivial command that only the live editor can answer; its answer proves
-	// the document is loaded, hence that the toolbar that hosts the menu exists.
+	// A trivial command that only the live editor can answer (body in
+	// commands.js as `probe`); its answer proves the document is loaded, hence
+	// that the toolbar that hosts the menu exists.
 	function probeEditor() {
-		callEditorCommand(function () {
-			return JSON.stringify({ latexMathProbe: true });
-		}, {}).then(function (result) {
+		commands.run("probe", {}).then(function (result) {
 			if (result && result.latexMathProbe === true) {
 				markEditorReady("roundtrip");
 			}

@@ -626,16 +626,15 @@ test("the right-click row converts nothing when nothing is selected", async () =
 	);
 });
 
-test("an editor round-trip publishes the menus even without onTranslate", () => {
+test("an editor round-trip publishes the menus even without onTranslate", async () => {
 	const editor = createEditor({ paragraphs: ["$d$"] });
 	const harness = createHarness(editor);
 	harness.initOnly();
 
-	// The probe command is answered synchronously by the simulated editor, so
-	// the promise chain settles on the microtask queue.
-	return Promise.resolve().then(() => {
-		assert.strictEqual(harness.harness.toolbarRegistered, true);
-	});
+	// The simulated editor answers like the real host - deferred out of the
+	// callCommand stack - so the probe's round trip lands a turn later.
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.strictEqual(harness.harness.toolbarRegistered, true);
 });
 
 // A host that says `init` and then `onThemeChanged` is the case the readiness
