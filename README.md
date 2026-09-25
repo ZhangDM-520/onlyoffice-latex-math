@@ -203,9 +203,28 @@ goes missing.
 node --test tests/          # 132 tests: scanner, icons, hotkeys, harness, integration, report
 ```
 
-`plugin/scripts/scan.js` is the pure core (delimiter rules, offset planning) and is deliberately free
-of editor API calls, so it is fully testable headlessly; `plugin/scripts/code.js` is the thin glue
-that talks to the host and runs the editor commands through `Asc.plugin.callCommand`.
+### Code map
+
+The chain a conversion travels: `code.js` (orchestration) → `scan.js` (pure scanner) →
+`commands.js` (editor-page commands) — with `report.js` as the report window's own page script.
+
+| File | Lines | What it owns |
+| :--- | ---: | :--- |
+| `plugin/scripts/scan.js` | ~650 | The pure core: delimiter rules, pairing decisions (`closerIsAlsoAnOpener`, `refusedDollarIsAnOpener`), span and offset planning. No editor API calls, fully testable headlessly. |
+| `plugin/scripts/code.js` | ~1230 | Everything else: settings, menu publication, hotkeys, the editor-command bridge, `convertSelection` (read → plan → apply → verify → report), report windows. Not "thin glue" — it is the majority of the plugin and the file to open first when behaviour surprises you. |
+| `plugin/scripts/commands.js` | ~200 | Self-contained command bodies compiled by `makeCommand` from string sources against a shared `PRELUDE` and run through `Asc.plugin.callCommand`. Holds the `text-mismatch` safety net. |
+| `plugin/scripts/report.js` | ~150 | The report window's page script: URL payload decoding, copy-to-clipboard, close protocol. Deep for its size — it hides real host quirks. |
+
+**The one structural fact to know before touching offsets:** a paragraph's document range counts
+**positions**, while `GetText()` returns **characters** (plus the paragraph mark as CRLF), and an
+inline equation object costs 3 positions for the 1 character it renders. They are two coordinate
+systems; `planReplacements` works in characters, the editor works in positions, and the probe in
+`code.js` (`RESOLVE_BODY`) maps between them. Never compare `end - start` with `text.length`
+(details and measurements in `docs/NOTE.md` §1.7).
+
+Tests mirror the host's *gates*, not just its API surface (`tests/plugin-harness.js`,
+`tests/fake-editor.js`), so the doubles are documented contracts — if the host changes, the mirror
+is what to update first.
 
 ## Known limitations
 

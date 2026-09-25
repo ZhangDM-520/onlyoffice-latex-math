@@ -6,6 +6,31 @@ Measured against **onlyoffice-git 9.4.0.130-1** (built from
 
 Everything below was reproduced live in the real editor; nothing here is inferred from docs.
 
+## How to read this note
+
+Two kinds of content live here, deliberately interleaved by section:
+
+* **§1 Host facts** and **§2 Debugging recipes** are *normative*: they decide how the plugin is built
+  and how to measure anything about it. Read these before changing code.
+* **§3 Verification log**, **§5 Upstream** are *historical*: what was measured when, and what the
+  vendor's issue tracker says. Read these when you need evidence, not rules.
+
+Section numbers are **not in visual order** (§1.11, the ribbon rule, sits between §1.2 and §1.3 for
+historical reasons; cross-references use the numbers, so they are not renumbered). Reading order for
+a newcomer:
+
+1. `README.md` *Code map* — the four script files and the two coordinate systems.
+2. **§1.7** (positions vs characters) and **§1.8** (delimiter rules) — the two facts every scanner
+   change depends on.
+3. **§1.1, §1.2, §1.11** — why the UI is a settings ribbon, one right-click row, and `Alt+L`.
+4. **§2** — how to look at the running app instead of guessing.
+5. **§3** — what has been proven live, including the row-1/row-2 repro pass (2026-09-23).
+6. **§4** — test layout: which file defends which rule.
+
+The `$...$` pairing rules (§1.8, the `closerIsAlsoAnOpener` row) are implemented with matching
+condition letters in `plugin/scripts/scan.js` and pinned by REPRO/CONTROL/ACCEPTED fixtures in
+`tests/scan.test.js` — the fixture names are the map from test to rule.
+
 ## 1. Host facts that decide the design
 
 ### 1.1 Menus must not be published from `Asc.plugin.init`
@@ -549,3 +574,28 @@ curl -sSL 'https://community.onlyoffice.com/search.json?q=<term>'    # -L matter
 umbrella. (b) If `#3809` is implemented, the plugin's remaining value is only builds older than the
 release that ships it, so re-check before adding features. (c) Anyone arguing that the behaviour
 "should already work" is answered by the quote table above, not by the user guide alone.
+
+## 6. Architecture review — 2026-09-25 (maintainability pass)
+
+A `/improve-codebase-architecture` walk of the work through `84bbda8`, aimed at making the project
+easy to pick up for later maintainers. The visual report with before/after diagrams is written to
+the OS temp dir per the skill (nothing lands in the repo); the durable output is this table.
+Vocabulary is the `codebase-design` one: **module**, **interface**, **depth**, **seam**, **leak**.
+
+| # | Candidate | Strength | Where the friction is |
+| :- | :--- | :--- | :--- |
+| 1 | One owner for "where is this span in the document" | **Strong** | The char-offset ↔ position mapping is implemented in five mutually-referential places (scan.js `positionOf`, code.js `RESOLVE_BODY`, commands.js guard, fake-editor geometry, README + §1.7). The pure scanner documents the glue's data format. The row-2 drift bug lived exactly here and passed every scan test. |
+| 2 | Split `code.js` at its own section banners | Worth exploring | 1232 lines, six fused concerns; `convertSelection` interleaves policy, report wording and orchestration; `verify()` is reachable only from inside its promise chain. |
+| 3 | One owner for "run this in the editor page" | Worth exploring | `RESOLVE_BODY` is orphaned in code.js while its siblings live in commands.js; the string-body seam compiles against a `PRELUDE` the bodies cannot see; the harness runs commands *synchronously*, so the real timeout/clobber/unparsable behaviour is untested. |
+| 4 | One decision record for the dollar-pairing rules | **Strong** (docs only) | The five + three conditions are prose in four places; ablation counts in §1.8 say "128" where the suite is 132. Rule IDs in code + a fixture↔rule map would make drift mechanical to catch. |
+| 5 | Doubles declare which host contracts they mirror | Speculative | `plugin-harness.js` / `fake-editor.js` mix measured host behaviour with conveniences (the synchronous `callCommand` is *friendlier* than the real seam); a host upgrade leaves every test green. |
+| 6 | One owner of the report record shape | Worth exploring | `makeReport`/`reportLine` produce the payload, `report.js` consumes it, `report.test.js` hand-builds it — no shared definition, so producer/consumer can drift silently. |
+
+What is already good and should survive any refactor: `scan.js` is a genuinely deep pure core;
+the write path is defence-in-depth (`text-mismatch`, `misplaced-after-insert`, back-to-front
+application); the harness recompiles command strings in a separate realm; `createHotkeyMatcher` is
+pure and injectable; the ablation methodology (drop a condition, count failures) is rare and keeps
+the guard rules honest.
+
+Doc updates from this pass: README gained a *Code map* (four script files, the two coordinate
+systems, where to look first); this note gained a *How to read this note* map above §1.
