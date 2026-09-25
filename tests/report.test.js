@@ -4,26 +4,59 @@
  * *second* "?" - "report.html?lang=en-GB&theme-type=dark?report={...}" - which
  * the first implementation did not match at all. These tests drive the real
  * `report.js` against both shapes.
+ *
+ * The payload is **producer bytes**: a real conversion run through the harness,
+ * its recorded report window URL taken as the search string. Hand-building the
+ * record here (as these tests used to) let producer and consumer drift apart
+ * while every test stayed green. The one hand-built payload left is the corrupt
+ * one below - it is deliberately not a record.
  */
 "use strict";
 
-const test = require("node:test");
+const { test, before } = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
+const reportRecord = require(path.join(__dirname, "..", "plugin", "scripts", "report-record.js"));
+const { createEditor } = require(path.join(__dirname, "fake-editor.js"));
+const { createHarness } = require(path.join(__dirname, "plugin-harness.js"));
+
 const REPORT_SOURCE = fs.readFileSync(
 	path.join(__dirname, "..", "plugin", "scripts", "report.js"),
 	"utf8"
 );
+// report.html loads scripts/report-record.js before scripts/report.js; the
+// sandbox below reproduces that order so the page script runs as it ships.
+const RECORD_SOURCE = fs.readFileSync(
+	path.join(__dirname, "..", "plugin", "scripts", "report-record.js"),
+	"utf8"
+);
 
-const REPORT = {
-	title: "LaTeX math conversion report",
-	when: "2026-09-20T21:10:00.000Z",
-	lines: ["Scanned: 4 paragraphs, 4 LaTeX spans found (1 display)", "Converted: 4 / 4"],
-	converted: 4
-};
+/*
+ * Producer bytes, once per run: the real code.js converting `$a$` through the
+ * harness with the report window on. `search` is exactly the query string the
+ * window page sees after "report.html"; `record` is the report the producer
+ * kept - the expected value behind every rendering assertion below.
+ */
+let produced = null;
+before(async () => {
+	const editor = createEditor({ paragraphs: ["$a$"], selection: { start: 0, end: 3 } });
+	const harness = createHarness(editor);
+	harness.window.localStorage.setItem(
+		"onlyoffice-latex-math.settings",
+		JSON.stringify({ version: 2, openReport: true })
+	);
+	harness.init();
+	await harness.convertSelection();
+	const url = harness.harness.windows[0].variation.url;
+	produced = {
+		search: url.substring(url.indexOf("report.html") + "report.html".length),
+		record: JSON.parse(JSON.stringify(harness.getLastReport()))
+	};
+	assert.strictEqual(produced.search.indexOf("?report="), 0, "the producer URL carries the payload");
+});
 
 /**
  * Runs the real report.js against a minimal DOM.
@@ -79,6 +112,7 @@ function renderAt(search, options) {
 			logs.push(Array.prototype.slice.call(arguments).map(String).join(" "));
 		}
 	};
+	const sandbox = { window: window, document: document, console: consoleStub, self: window };
 	// `sdkAfterReady` models the real desktop app: ../v1/plugins.js publishes
 	// Asc.plugin.windowID from an XHR callback, so the API is *not* there when the
 	// page finishes parsing. A check made that early hid the Close button for good,
@@ -98,7 +132,9 @@ function renderAt(search, options) {
 		installSdk(options.windowID);
 	}
 
-	vm.runInNewContext(REPORT_SOURCE, { window: window, document: document, console: consoleStub });
+	vm.createContext(sandbox);
+	vm.runInContext(RECORD_SOURCE, sandbox, { filename: "report-record.js" });
+	vm.runInContext(REPORT_SOURCE, sandbox, { filename: "report.js" });
 	assert.ok(onReady, "report.js registered a DOMContentLoaded handler");
 	onReady();
 	elements.window = window;
@@ -122,28 +158,69 @@ function renderAt(search, options) {
 	return elements;
 }
 
-function payloadUrl(hostPrefix) {
-	return hostPrefix + "?report=" + encodeURIComponent(JSON.stringify(REPORT));
-}
-
 /** The calls the page made into the host, copied out of the vm realm. */
 function calls(elements) {
 	return JSON.parse(JSON.stringify(elements.window.calls || []));
 }
 
-test("the report renders the payload when the host has not touched the URL", () => {
-	const elements = renderAt(payloadUrl(""));
-	assert.strictEqual(elements.title.textContent, REPORT.title);
-	assert.strictEqual(elements.lines.textContent, REPORT.lines.join("\n"));
+test("the report renders the producer's payload when the host has not touched the URL", () => {
+	const elements = renderAt(produced.search);
+	// Anchored on the conversion's own wording, so a producer that stopped
+	// filling the record cannot pass by matching an empty expectation.
+	assert.strictEqual(elements.title.textContent, "Convert selection");
+	assert.match(elements.lines.textContent, /Converted: 1 \/ 1/);
+	assert.strictEqual(elements.lines.textContent, reportRecord.textOf(produced.record));
+});
+
+test("the URL decodes back to exactly the record the producer kept", () => {
+	assert.deepStrictEqual(reportRecord.decode(produced.search), produced.record);
 });
 
 test("the report still renders when the host prepends its own query parameters", () => {
-	// Exactly the URL observed in the real desktop app.
-	const elements = renderAt(
-		"?lang=en-GB&theme-type=dark" + payloadUrl("") + "&windowID=editor_1"
+	// Exactly the URL observed in the real desktop app: the host's own
+	// parameters land between "report.html" and the producer's payload, which is
+	// where the second "?" comes from.
+	const elements = renderAt("?lang=en-GB&theme-type=dark" + produced.search + "&windowID=editor_1");
+	assert.strictEqual(elements.title.textContent, "Convert selection");
+	assert.strictEqual(elements.lines.textContent, reportRecord.textOf(produced.record));
+});
+
+test("a record round-trips through its URL form", () => {
+	const record = reportRecord.make("round trip");
+	assert.deepStrictEqual(reportRecord.decode(reportRecord.encode(record)), record);
+});
+
+test("encode reproduces the pre-module payload URL byte for byte", () => {
+	// `code.js` showReport used to inline
+	// `"?report=" + encodeURIComponent(JSON.stringify(report))`; moving the seam
+	// into report-record.js must not change a byte. The record below is frozen
+	// *input* for the encoder - not a stand-in for producer output - which is
+	// what lets the expected string be a literal.
+	const record = {
+		title: "LaTeX math conversion report",
+		when: "2026-09-20 21:10:00",
+		lines: ["Converted: 4 / 4"],
+		converted: 4
+	};
+	assert.strictEqual(
+		reportRecord.encode(record),
+		"?report=%7B%22title%22%3A%22LaTeX%20math%20conversion%20report%22%2C%22when%22%3A%222026-09-20%2021%3A10%3A00%22%2C%22lines%22%3A%5B%22Converted%3A%204%20%2F%204%22%5D%2C%22converted%22%3A4%7D"
 	);
-	assert.strictEqual(elements.title.textContent, REPORT.title);
-	assert.strictEqual(elements.lines.textContent, REPORT.lines.join("\n"));
+});
+
+test("both pages load report-record.js before the script that consumes it", () => {
+	// A missing or late script tag is invisible until a real window renders
+	// "No report payload."; the shipped load order is a test failure instead.
+	function order(page, first, second) {
+		const html = fs.readFileSync(path.join(__dirname, "..", "plugin", page), "utf8");
+		const a = html.indexOf(first);
+		const b = html.indexOf(second);
+		assert.ok(a >= 0, page + " must load " + first);
+		assert.ok(b >= 0, page + " must load " + second);
+		assert.ok(a < b, page + " must load " + first + " before " + second);
+	}
+	order("index.html", "scripts/report-record.js", "scripts/code.js");
+	order("report.html", "scripts/report-record.js", "scripts/report.js");
 });
 
 test("a report window opened without a payload says so instead of throwing", () => {
@@ -153,6 +230,7 @@ test("a report window opened without a payload says so instead of throwing", () 
 });
 
 test("a corrupted payload degrades to the empty report", () => {
+	// Hand-built on purpose: a corrupt payload is deliberately not a record.
 	const elements = renderAt("?report=%7Bnot-json");
 	assert.strictEqual(elements.lines.textContent, "No report payload.");
 });
@@ -165,7 +243,7 @@ test("a corrupted payload degrades to the empty report", () => {
 // ---------------------------------------------------------------------------
 
 test("the page's Close button closes the window through the host", () => {
-	const elements = renderAt(payloadUrl("") + "&windowID=editor_7", { windowID: "editor_7" });
+	const elements = renderAt(produced.search + "&windowID=editor_7", { windowID: "editor_7" });
 	elements.close.listeners.click();
 
 	// JSON round-trip: the arrays are built inside the vm realm, and
@@ -174,7 +252,7 @@ test("the page's Close button closes the window through the host", () => {
 });
 
 test("Esc closes the window too, because the host disables key handling", () => {
-	const elements = renderAt(payloadUrl("") + "&windowID=editor_9", { windowID: "editor_9" });
+	const elements = renderAt(produced.search + "&windowID=editor_9", { windowID: "editor_9" });
 	assert.strictEqual(typeof elements.document.keydown, "function", "report.js listens for keys");
 
 	let prevented = false;
@@ -190,7 +268,7 @@ test("Esc closes the window too, because the host disables key handling", () => 
 });
 
 test("a page without the plugin SDK hides Close instead of pretending", () => {
-	const elements = renderAt(payloadUrl(""), { sdk: false });
+	const elements = renderAt(produced.search, { sdk: false });
 	// No SDK and no window id in the URL: this is not a plugin window, so there is
 	// nothing to close and no button is offered.
 	assert.strictEqual(elements.close.style.display, "none", "no SDK, no working Close button");
@@ -204,7 +282,7 @@ test("the Close button survives an SDK that arrives after the page has parsed", 
 	// from an XHR callback, so it is absent at DOMContentLoaded. Hiding the button
 	// because of a check made there hid it for real users even though the host was
 	// reachable (and the URL carried the id) moments later.
-	const elements = renderAt(payloadUrl("") + "&windowID=editor_5", {
+	const elements = renderAt(produced.search + "&windowID=editor_5", {
 		sdkAfterReady: true,
 		windowID: "editor_5"
 	});
@@ -222,7 +300,7 @@ test("the Close button survives an SDK that arrives after the page has parsed", 
 test("a window with no id offers no dead Close button", () => {
 	// Without a windowID the page cannot address the host's window, so a Close
 	// button would be a lie.
-	const elements = renderAt(payloadUrl(""), { windowID: "" });
+	const elements = renderAt(produced.search, { windowID: "" });
 	assert.strictEqual(elements.close.style.display, "none");
 	elements.document.keydown({ key: "Escape", preventDefault: function () {} });
 	assert.deepStrictEqual(calls(elements), [], "nothing is sent without a window id");
@@ -233,7 +311,7 @@ test("a window with no id offers no dead Close button", () => {
 // button looked like it worked and nothing was copied.
 test("the Copy button writes the report to the clipboard", () => {
 	const written = [];
-	const elements = renderAt(payloadUrl(""), {
+	const elements = renderAt(produced.search, {
 		clipboard: {
 			writeText: function (text) {
 				written.push(text);
@@ -243,12 +321,12 @@ test("the Copy button writes the report to the clipboard", () => {
 	});
 
 	assert.strictEqual(elements.click("copy"), true);
-	assert.deepStrictEqual(written, [REPORT.lines.join("\n")]);
+	assert.deepStrictEqual(written, [reportRecord.textOf(produced.record)]);
 	assert.deepStrictEqual(elements.errors, []);
 });
 
 test("a refused clipboard write is reported, not swallowed", async () => {
-	const elements = renderAt(payloadUrl(""), {
+	const elements = renderAt(produced.search, {
 		clipboard: {
 			writeText: function () {
 				return Promise.reject(new Error("denied"));
@@ -263,7 +341,7 @@ test("a refused clipboard write is reported, not swallowed", async () => {
 });
 
 test("a page without a clipboard API says so instead of pretending", () => {
-	const elements = renderAt(payloadUrl(""));
+	const elements = renderAt(produced.search);
 
 	assert.strictEqual(elements.click("copy"), false);
 	assert.strictEqual(elements.errors.length, 1);

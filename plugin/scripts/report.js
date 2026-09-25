@@ -3,10 +3,12 @@
  * closes itself.
  *
  * Data travels through the query string so the window needs no cross-frame
- * messaging and can be reloaded at will. Closing is the page's own job as well
- * as the host's: the host's dialog footer button and header X both arrive in the
- * plugin frame (see Asc.plugin.button in code.js), but the page also offers a
- * Close button and Esc so the window is never a trap.
+ * messaging and can be reloaded at will. The record shape, its URL encoding and
+ * the close protocol this page takes part in all have one owner:
+ * report-record.js's header (loaded by report.html just before this file, and
+ * realm-safe - never load scripts/code.js here, it would re-register the
+ * menus). What stays here is the page-realm behaviour itself: rendering,
+ * copy-to-clipboard, and this half of closing.
  *
  * ../v1/plugins.js is loaded by report.html for this: it publishes this page's
  * `windowID` from its own URL and provides `executeMethod`.
@@ -14,28 +16,19 @@
 (function (window, document) {
 	"use strict";
 
-	function readReport() {
-		// The desktop host appends its own parameters to the plugin window URL, so
-		// the payload arrives after a second "?" -
-		// "report.html?lang=en-GB&theme-type=dark?report={...}&windowID=..." -
-		// which is why the separator may be either "?" or "&".
-		var search = window.location.search || "";
-		var match = /[?&]report=([^&]*)/.exec(search);
-		if (!match) {
-			return null;
-		}
-		try {
-			return JSON.parse(decodeURIComponent(match[1]));
-		} catch (e) {
-			return null;
-		}
+	var reportRecord = window.OnlyOfficeLatexMathReportRecord;
+	if (!reportRecord) {
+		// Loading-order problem (report.html must load scripts/report-record.js
+		// before this file): fail loudly instead of rendering a lie.
+		console.error("[latex-math] report-record.js missing");
+		return;
 	}
 
-	function textOf(report) {
-		if (!report) {
-			return "No report payload.";
-		}
-		return (report.lines || []).join("\n");
+	function readReport() {
+		// The host appends its own parameters to the window URL first, so the
+		// payload may arrive after a second "?" - the separator tolerance is
+		// part of the seam report-record.js owns.
+		return reportRecord.decode(window.location.search || "");
 	}
 
 	function plugin() {
@@ -77,6 +70,8 @@
 		}
 	}
 
+	// The page half of the close protocol - its one description lives in
+	// report-record.js's header (why this call closes the window is there too).
 	function closeSelf() {
 		var api = plugin();
 		if (!api || typeof api.executeMethod !== "function") {
@@ -85,19 +80,14 @@
 		if (!api.windowID) {
 			return false;
 		}
-		// PluginWindow.prototype.close() does exactly this; the page has no
-		// PluginWindow instance of its own, only its id.
 		api.executeMethod("CloseWindow", [api.windowID]);
 		return true;
 	}
 
-	// ../v1/plugins.js publishes Asc.plugin.windowID from an **XHR callback**, so
-	// it does not exist yet when this page finishes parsing: in the real desktop
-	// app the Close button was therefore hidden by the check that used to happen
-	// here, while `Esc` kept working because it re-resolves the API at keydown
-	// time. Do not try to time it either - read the same id out of this page's own
-	// URL, which the host always appends, and hide the button only when neither
-	// source can supply one.
+	// The windowID XHR race this works around is described in report-record.js's
+	// header (docs/NOTE.md §1.9): the SDK's copy of the id may not exist yet at
+	// parse time, but the host always appends it to this page's own URL, so read
+	// it there and hide the button only when neither source can supply one.
 	function urlWindowId() {
 		var match = /[?&]windowID=([^&]*)/.exec(window.location.search || "");
 		return match ? match[1] : "";
@@ -107,17 +97,18 @@
 		var report = readReport();
 		document.getElementById("title").textContent = (report && report.title) || "LaTeX math";
 		document.getElementById("when").textContent = (report && report.when) || "";
-		document.getElementById("lines").textContent = textOf(report);
+		document.getElementById("lines").textContent = reportRecord.textOf(report);
 
 		document.getElementById("copy").addEventListener("click", function () {
-			return copyText(textOf(report));
+			return copyText(reportRecord.textOf(report));
 		});
 
 		var closeButton = document.getElementById("close");
 		if (closeButton) {
-			// Bound unconditionally: the SDK is not necessarily ready yet, and a
-			// click that arrives before it lands closes the window as soon as it
-			// does, whereas a button hidden by an early check is gone for good.
+			// Bound unconditionally, because the windowID XHR race means the SDK
+			// is not necessarily ready yet (report-record.js's header): a click
+			// that arrives before it lands closes the window as soon as it does,
+			// whereas a button hidden by an early check is gone for good.
 			closeButton.addEventListener("click", closeSelf);
 			if (!canClose() && !urlWindowId()) {
 				// Neither the SDK nor the URL identifies a host window: this page is
@@ -126,8 +117,8 @@
 			}
 		}
 
-		// The host's dialog disables its own key handling for plugin windows, so
-		// Esc is handled here.
+		// Esc is the page's half of the close protocol (report-record.js's
+		// header): the host's dialog disables its own key handling.
 		document.addEventListener("keydown", function (event) {
 			if (event.key === "Escape" || event.keyCode === 27) {
 				if (closeSelf()) {

@@ -22,6 +22,12 @@ var CODE_SOURCE = fs.readFileSync(path.join(__dirname, "..", "plugin", "scripts"
 // Node requires; the compiled command bodies can also be driven directly from
 // the test realm (see tests/integration.test.js).
 var COMMANDS_SOURCE = fs.readFileSync(path.join(__dirname, "..", "plugin", "scripts", "commands.js"), "utf8");
+// report-record.js is loaded the way production loads it too - a plain script
+// of the fake plugin frame, before code.js (index.html's order).
+var REPORT_RECORD_SOURCE = fs.readFileSync(
+	path.join(__dirname, "..", "plugin", "scripts", "report-record.js"),
+	"utf8"
+);
 
 function createStorage() {
 	var data = {};
@@ -511,6 +517,7 @@ function createHarness(editor, options) {
 
 	vm.createContext(context);
 	vm.runInContext(COMMANDS_SOURCE, context, { filename: "commands.js" });
+	vm.runInContext(REPORT_RECORD_SOURCE, context, { filename: "report-record.js" });
 	vm.runInContext(CODE_SOURCE, context, { filename: "code.js" });
 
 	return {

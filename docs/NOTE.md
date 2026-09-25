@@ -19,7 +19,7 @@ Section numbers are **not in visual order** (§1.11, the ribbon rule, sits betwe
 historical reasons; cross-references use the numbers, so they are not renumbered). Reading order for
 a newcomer:
 
-1. `README.md` *Code map* — the four script files and the two coordinate systems.
+1. `README.md` *Code map* — the script files and the two coordinate systems.
 2. **§1.7** (positions vs characters) and **§1.8** (delimiter rules) — the two facts every scanner
    change depends on.
 3. **§1.1, §1.2, §1.11** — why the UI is a settings ribbon, one right-click row, and `Alt+L`.
@@ -517,7 +517,10 @@ section; `tests/rules.test.js` keeps live counts out of this file and the README
   the [`docs/adr/0001-dollar-pairing.md`](adr/0001-dollar-pairing.md) manifest, every manifest ID has
   a `// rule:`-annotated fixture in `scan.test.js`, and neither the README nor this file states a
   numeric test count.
-* `report.test.js` — the report payload survives the host's URL mangling and corrupted input.
+* `report.test.js` — the report record's URL seam, driven by producer bytes (the recorded window
+  URL of a real conversion run through the harness): the payload survives the host's URL mangling
+  and corrupted input, `encode`/`decode` round-trip, and both pages load `report-record.js` before
+  the script that consumes it.
 
 ## 5. Upstream: the same gap, and where it is tracked
 
@@ -597,7 +600,7 @@ Vocabulary is the `codebase-design` one: **module**, **interface**, **depth**, *
 | 3 | One owner for "run this in the editor page" | **Landed 2026-09-25** | The seam was split: `RESOLVE_BODY` orphaned in code.js while its siblings lived in commands.js, the string-body seam compiling against a `PRELUDE` the bodies cannot see, the harness running commands *synchronously* so the real timeout/clobber/unparsable behaviour was untested. `plugin/scripts/commands.js` now owns the whole seam — the bodies plus `run(name, payload)` — dispatching one `callCommand` at a time over the shared `Asc.scope` slot (a queued run behind a hung one waits out its timeout instead of fail-fast supersede displacing its answer) and answering the error taxonomy `timeout`/`unparsable-command-result`/`clobbered`/`callCommand-unavailable`/`callCommand-threw`. The harness answers asynchronously (`commandDelay`/`commandNeverAnswers`/`commandRaw`/`commandOverlaps`), so those paths are pinned. (First step landed 2026-09-25 with candidate 1: `RESOLVE_BODY` moved next to its siblings.) |
 | 4 | One decision record for the dollar-pairing rules | **Strong** (docs only) | The five + three conditions are prose in four places and kept in sync by hand; the ablation counts restated in §1.8 go stale whenever the suite moves. Rule IDs in code + a fixture↔rule map would make drift mechanical to catch. |
 | 5 | Doubles declare which host contracts they mirror | Speculative | `plugin-harness.js` / `fake-editor.js` mix measured host behaviour with conveniences (the asynchronous `callCommand` mirrors the seam's shape but its knobs — delay, never-answers, raw answers, overlap hooks — are conveniences); a host upgrade leaves every test green. |
-| 6 | One owner of the report record shape | Worth exploring | `makeReport`/`reportLine` produce the payload, `report.js` consumes it, `report.test.js` hand-builds it — no shared definition, so producer/consumer can drift silently. |
+| 6 | One owner of the report record shape | **Landed 2026-09-26** | The payload had no shared definition: `makeReport`/`reportLine` produced it, `report.js` consumed it, `report.test.js` hand-built it — so producer and consumer could drift silently while every test stayed green. `plugin/scripts/report-record.js` now owns the record shape and its URL serialization (`make`/`encode`/`decode`/`textOf`), loaded by script tag in both realms (realm-safe: it registers nothing; `report.html` still never loads `code.js`). `code.js` keeps the report *authoring* (`reportLine`/`summarizeSkipped` — conversion wording, not record layout) and `report.js` the page behaviour; neither names a field. `tests/report.test.js` is fed producer bytes (the recorded window URL of a real conversion run through the harness), with one hand-built corrupt payload kept as the non-record case, plus the `decode(encode(make()))` round trip and a byte-for-byte pin of the encoder's output. The report window's close lifecycle is now described once, in `report-record.js`'s header. |
 
 What is already good and should survive any refactor: `scan.js` is a genuinely deep pure core;
 the write path is defence-in-depth (`text-mismatch`, `misplaced-after-insert`, back-to-front

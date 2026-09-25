@@ -9,6 +9,8 @@
  *   - locate.js    span placement: character offsets -> document positions
  *   - commands.js  editor-page command bodies and the `run` seam that executes
  *                  them (payload handoff, answer parsing, timeout taxonomy)
+ *   - report-record.js  the report record shape and its URL serialization (the
+ *                  seam into the report window's page)
  *   - code.js      this file: settings, menus, hotkeys, orchestration, reporting
  */
 (function (window) {
@@ -17,10 +19,11 @@
 	var core = window.OnlyOfficeLatexMath;
 	var commands = window.OnlyOfficeLatexMathCommands;
 	var locate = window.OnlyOfficeLatexMathLocate;
+	var reportRecord = window.OnlyOfficeLatexMathReportRecord;
 
-	if (!core || !commands || !locate) {
+	if (!core || !commands || !locate || !reportRecord) {
 		// Loading order problem: fail loudly instead of silently doing nothing.
-		console.error("[latex-math] scan.js / commands.js / locate.js missing");
+		console.error("[latex-math] scan.js / commands.js / locate.js / report-record.js missing");
 		return;
 	}
 
@@ -164,16 +167,12 @@
 
 	/* ------------------------------------------------------------------ *
 	 * Reporting
+	 *
+	 * The record *shape* and its URL serialization are owned by
+	 * report-record.js (`make`/`encode`/`decode`/`textOf`); what stays here is
+	 * report *authoring* - the wording of a conversion and the bucketing of its
+	 * skips - which is conversion policy, not record layout.
 	 * ------------------------------------------------------------------ */
-
-	function makeReport(title) {
-		return {
-			title: title,
-			when: new Date().toISOString().replace("T", " ").substring(0, 19),
-			lines: [],
-			converted: 0
-		};
-	}
 
 	function reportLine(report, text) {
 		report.lines.push(text);
@@ -204,13 +203,14 @@
 			var start = location.pathname.lastIndexOf("/") + 1;
 			var file = location.pathname.substring(start);
 			var base = location.href.replace(file, "report.html");
-			var payload = encodeURIComponent(JSON.stringify(report));
-			// `buttons` is what the host renders as the dialog footer, and the
-			// dialog also sets `enableKeyEvents: false`, so this Close button is the
-			// only affordance the host itself offers. Its click arrives in
-			// `Asc.plugin.button` below. The header X arrives there too.
+			// `reportRecord.encode` owns the payload URL's bytes - including the
+			// second-"?" separator quirk (see its header). `buttons` is what the
+			// host renders as the dialog footer, and the dialog also sets
+			// `enableKeyEvents: false`: the close lifecycle those two shape is
+			// described once, in report-record.js's header. The footer/X clicks
+			// arrive in `Asc.plugin.button` below.
 			var variation = {
-				url: base + "?report=" + payload,
+				url: base + reportRecord.encode(report),
 				description: tr("LaTeX math conversion report"),
 				isVisual: true,
 				isModal: false,
@@ -250,7 +250,7 @@
 	 */
 	function showLastReport() {
 		if (!lastReport) {
-			var empty = makeReport(tr("Show last report"));
+			var empty = reportRecord.make(tr("Show last report"));
 			reportLine(empty, tr("No conversion has been run yet."));
 			showReport(empty, true);
 			return;
@@ -275,7 +275,7 @@
 	 * the module whether it kept one.
 	 */
 	function convertSelection() {
-		var report = makeReport(tr("Convert selection"));
+		var report = reportRecord.make(tr("Convert selection"));
 
 		if (enabledDelimiterCount() === 0) {
 			reportLine(report, tr("No delimiters are enabled. Turn one on in the plugin menu."));
@@ -1024,20 +1024,11 @@
 		markEditorReady("interaction");
 	};
 
-	// **Mandatory once the plugin opens a window.** The host's injected router
-	// (sdkjs/word/sdk-all.js, the `plugin_onMessage` blob) dispatches every dialog
-	// button like this:
-	//
-	//     case "button":
-	//       Asc.plugin.button || (-1 !== k) || n !== g.buttonWindowId
-	//           ? Asc.plugin.button(k, g.buttonWindowId)   // throws when undefined
-	//           : Asc.plugin.executeCommand("close", "");
-	//
-	// The message is posted to *this* frame, whose id is never the window id, so
-	// the first branch is always taken. Without this hook the header X (and the
-	// footer Close button) threw a TypeError inside the message handler and the
-	// report window could not be closed at all - measured live against
-	// 9.4.0.130-1. The shipped AI plugin defines it for the same reason.
+	// The plugin-frame half of the close protocol. The protocol has one
+	// description - the header of report-record.js; this is its call site.
+	// Mandatory once the plugin opens a window: without this hook the host's
+	// injected router throws and nothing closes at all (measured 9.4.0.130-1;
+	// the router source: docs/NOTE.md §1.5).
 	window.Asc.plugin.button = function (id, windowId) {
 		if (!windowId) {
 			return;
@@ -1045,8 +1036,7 @@
 		if (!reportWindow || String(reportWindow.id) !== String(windowId)) {
 			return;
 		}
-		// Every id closes the report: 0 is the footer Close button, -1 is the
-		// dialog's header X. The page can also close itself (see report.js).
+		// Every id closes the report window.
 		closeReportWindow();
 	};
 

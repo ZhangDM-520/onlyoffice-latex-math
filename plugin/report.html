@@ -59,9 +59,12 @@
 	</div>
 	<!-- The SDK publishes windowID from this page's own URL and provides
 	     executeMethod, which is how the page closes itself if the host's own
-	     buttons are unavailable. Never load scripts/code.js here: that would
+	     buttons are unavailable. scripts/report-record.js is the shared record
+	     shape and is realm-safe (it registers nothing), so this page loads it
+	     before scripts/report.js. Never load scripts/code.js here: that would
 	     re-register the plugin's menus from a second frame. -->
 	<script type="text/javascript" src="../v1/plugins.js"></script>
+	<script type="text/javascript" src="scripts/report-record.js"></script>
 	<script type="text/javascript" src="scripts/report.js"></script>
 </body>
 </html>
