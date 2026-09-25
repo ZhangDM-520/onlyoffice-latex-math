@@ -13,9 +13,13 @@
  *
  * Ranges that would span more than one paragraph throw, because the plugin is
  * never allowed to build such a range.
+ *
+ * Host contract: Desktop Editors 9.4.0.130-1, editors/sdkjs-plugins/{pluginBase.js,v1/plugins.js}
  */
 "use strict";
 
+// MIRROR(ApiParagraph paragraph-mark geometry, 9.4.0.130-1): the mark costs one
+// position in the range but renders as CRLF in GetText - measured below.
 var PARAGRAPH_MARK_COST = 1;
 
 // The host's ApiParagraph.GetText() renders the trailing paragraph mark as CRLF
@@ -41,20 +45,29 @@ function createEditor(options) {
 		lastInsertedMath: null,
 		currentMath: null,
 		selection: options.selection || null,
+		// CONVENIENT: fixture-only switch between placeholder-glyph and latex
+		// rendering; the real editor offers no such knob.
 		mathRendersAsPlaceholder: !!options.mathRendersAsPlaceholder,
+		// MIRROR(ApiParagraph equation offsets, 9.4.0.130-1):
 		// Positions an equation object costs, as opposed to the character it
 		// renders. The live editor counts an inline `oMath` as 3 positions for the
 		// 1 character its text shows, which is what makes `paragraph.start +
 		// span.start` drift (REPRO row 2). Default 1 keeps every other fixture on
 		// the plain 1:1 geometry.
 		equationPositionCost: options.equationPositionCost || 1,
+		// CONVENIENT: failure injection - no host API produces a per-latex insert
+		// failure.
 		failInsert: options.failInsert || {},
 		// The caret an ApiDocument.AddMathEquation call inserts at. It starts at the
 		// top of the document, which is where the editor leaves it for a command
 		// that never touches the selection.
 		caret: 0,
 		cursorMoves: [],
+		// CONVENIENT: build-variant switch driving the MoveCursorToPos removal
+		// below; the real host has no such knob.
 		hasMoveCursorApi: options.hasMoveCursorApi !== false,
+		// CONVENIENT: fixture-only switch; the default (an empty selection reported
+		// as a collapsed range at the caret) is the measured host behaviour.
 		exposeCaretAsSelection: options.exposeCaretAsSelection !== false
 	};
 
@@ -125,6 +138,9 @@ function createEditor(options) {
 		return null;
 	}
 
+	// CONVENIENT: stricter than the host - real ApiRanges may span paragraphs,
+	// but this double refuses so the plugin's single-paragraph assumption stays
+	// enforced by every test.
 	function assertSingleParagraph(start, end) {
 		var head = paragraphOf(start);
 		var tail = paragraphOf(end);
@@ -244,6 +260,7 @@ function createEditor(options) {
 				return true;
 			},
 			Delete: function () {
+				// MIRROR(ApiRange.Delete, 9.4.0.130-1):
 				// Faithful to ApiRange.Delete: it saves the document state before the
 				// removal and loads it back afterwards, so the caret keeps whatever
 				// value it had when the command started. Ignoring this is what makes

@@ -145,20 +145,13 @@ Detection is deliberately biased towards *not* discarding anything:
    equation.
 3. Offsets are read from the document snapshot and re-checked at apply time, spans are applied
    back-to-front so earlier offsets stay valid, and everything lands in one undo step.
-4. **A `$` is never taken from a real expression to close a stray one.** When the candidate closer
-   could itself open a complete span ahead — it can start math, an even number of `$` remains from it,
-   and it really does close — **and the earlier opener's own body spans whitespace** (a stray `$` that
-   swallowed prose; on a spaceless body both pairings are token-local and reading order keeps the
-   earlier opener, so `$x$y$` pairs `x` and leaves the trailing `$` visible) — the *earlier* opener is
-   the one abandoned, and it is reported as guarded
-   rather than converted. Without this, `It costs $5, and the value=$x$ here.` turned
-   `$5, and the value=$` into an equation and left `x$ here.` as prose, silently. The same holds when a
-   guard *refuses* the closer: the refused `$` is re-read as an opener only if it is not a price and
-   really does close with a non-empty body, so `cost $5, that will be $x+5$` converts `$x+5$` instead
-   of swallowing it while `$10-$20` still reports one guarded warning and no phantom. `$` in prose is
-   not decidable by one
-   character rule (rejecting digit-opened spans would break `$5$` and `$2 + 3$`), which is also why
-   conversion is scoped to the selection you made.
+4. **A `$` is never taken from a real expression to close a stray one.** When a candidate closer could
+   itself open a complete span ahead, or a guard-refused `$` turns out to be a real opener, the *earlier*
+   opener is the one abandoned and reported as guarded — so `It costs $5, and the value=$x$ here.`
+   converts `$x$` instead of eating it while `$10-$20` still reports one guarded warning and no phantom.
+   The dollar-pairing rules are owned, condition by condition with their rejected alternatives and
+   accepted losses, by one decision record:
+   [`docs/adr/0001-dollar-pairing.md`](docs/adr/0001-dollar-pairing.md).
 
 ## Report window
 
@@ -200,7 +193,7 @@ goes missing.
 ## Tests
 
 ```bash
-node --test tests/          # 132 tests: scanner, icons, hotkeys, harness, integration, report
+node --test tests/          # the full suite: scanner, icons, hotkeys, harness, integration, report, rule map
 ```
 
 ### Code map
@@ -210,7 +203,7 @@ The chain a conversion travels: `code.js` (orchestration) → `scan.js` (pure sc
 
 | File | Lines | What it owns |
 | :--- | ---: | :--- |
-| `plugin/scripts/scan.js` | ~650 | The pure core: delimiter rules, pairing decisions (`closerIsAlsoAnOpener`, `refusedDollarIsAnOpener`), span and offset planning. No editor API calls, fully testable headlessly. |
+| `plugin/scripts/scan.js` | ~650 | The pure core: delimiter rules, pairing decisions (`closerIsAlsoAnOpener`, `refusedDollarIsAnOpener`, owned by `docs/adr/0001-dollar-pairing.md`), span and offset planning. No editor API calls, fully testable headlessly. |
 | `plugin/scripts/code.js` | ~1230 | Everything else: settings, menu publication, hotkeys, the editor-command bridge, `convertSelection` (read → plan → apply → verify → report), report windows. Not "thin glue" — it is the majority of the plugin and the file to open first when behaviour surprises you. |
 | `plugin/scripts/commands.js` | ~200 | Self-contained command bodies compiled by `makeCommand` from string sources against a shared `PRELUDE` and run through `Asc.plugin.callCommand`. Holds the `text-mismatch` safety net. |
 | `plugin/scripts/report.js` | ~150 | The report window's page script: URL payload decoding, copy-to-clipboard, close protocol. Deep for its size — it hides real host quirks. |
@@ -239,7 +232,6 @@ is what to update first.
 * Live conversion *while typing* would require patching sdkjs (`RunAutoCorrect.js`) and rebuilding
   onlyoffice-git — explicitly out of scope.
 * A **price is never re-offered as an opener**, so compact math that sits *behind* one is left alone:
-  in `cost $5, and $10$ is wrong` nothing is converted. Recovering it needs a rule about the shape of
-  the body, and such a rule would also refuse `$2 + 3$` there. Deliberate — a missed span stays text
-  you can select and convert by hand, while a wrong span deletes prose with no rollback. Pinned as a
-  test; see *How detection decides* and `docs/NOTE.md`.
+  in `cost $5, and $10$ is wrong` nothing is converted. Deliberate and pinned as
+  `DP-refused-currency/loss-1`; the rationale and the rejected alternatives live in
+  [`docs/adr/0001-dollar-pairing.md`](docs/adr/0001-dollar-pairing.md).

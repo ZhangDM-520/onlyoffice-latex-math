@@ -90,6 +90,9 @@ test("dollar followed by whitespace is not an opener", () => {
 	assert.deepStrictEqual(result.spans, []);
 });
 
+// rule: DP-refused-canStart — the refused `$` is re-read only when it can start
+// math. Here it sits at end of line, so `canStartInlineMath` refuses and the
+// step-past stands (kept for intent: the loop lands in the same place either way).
 test("closing dollar preceded by whitespace is rejected", () => {
 	const result = findMathSpans("$x + y $");
 	assert.deepStrictEqual(result.spans, []);
@@ -154,6 +157,8 @@ test("\\(...\\) is inline, so it never spans a line either", () => {
 
 // An empty body is a malformed span on *every* delimiter; reporting it on only
 // one of the four left three silent no-ops in the document.
+// rule: DP-closer-0 — the inline `$$x$` case below is where the pairing rule's
+// non-empty-body condition keeps `empty-span` as the accurate diagnosis.
 test("an empty body is reported on every delimiter", () => {
 	assert.ok(findMathSpans("$$$$").warnings.some((w) => w.code === "empty-span"));
 	assert.deepStrictEqual(
@@ -324,6 +329,8 @@ test("a paragraph with an unprovable offset still yields its spans", () => {
 // here so a later change has to face them.
 // ---------------------------------------------------------------------------
 
+// rule: DP-closer-a — pins `canStartInlineMath`, the predicate the pairing rule
+// reuses for a candidate closer: a `$` followed by punctuation has nothing to open.
 test("punctuation right after an opener is not math, but a bracket is fine", () => {
 	// The blacklist. Every one of these is a `$` doing duty as a currency symbol
 	// or a stray character, not a delimiter.
@@ -394,6 +401,9 @@ test("a closer after a trailing space is guarded, not unterminated", () => {
 // because this one eats correct math.
 // ---------------------------------------------------------------------------
 
+// rule: DP-closer-c (the nested close is what lets the rule fire and save `x`)
+// rule: DP-closer-w/rej-spaceless-body — counter-example `value=$x$`: the steal
+// has a whitespace-bearing body, so "require a spaceless body" would miss it.
 test("an unmatched $ does not steal the opener of a real expression", () => {
 	[
 		["price $5 and$x$ here", ["x"]],
@@ -414,6 +424,7 @@ test("an unmatched $ does not steal the opener of a real expression", () => {
 // protect: from the candidate closer the remainder is 3, so that `$` *is* the
 // current opener's partner. Reinterpreting would cost two real spans to make one
 // bogus one.
+// rule: DP-closer-b
 test("an odd remainder from the candidate keeps both real spans", () => {
 	const result = findMathSpans("$a$and$b$");
 	assert.deepStrictEqual(latexOf(result), ["a", "b"]);
@@ -423,6 +434,7 @@ test("an odd remainder from the candidate keeps both real spans", () => {
 // Both alternatives the rule was rejected for, pinned from the other side: a
 // digit-opened span and a spaced body inside one are legitimate math, so neither
 // may be used as a currency heuristic.
+// rule: DP-closer-b/rej-digit-opened — the counter-examples `$5$` and `$2 + 3$`.
 test("digit-opened and space-containing bodies are still math", () => {
 	assert.deepStrictEqual(latexOf(findMathSpans("Compare $5$ vs $6$.")), ["5", "6"]);
 	const spaced = findMathSpans("If $2 + 3$ then.");
@@ -443,6 +455,7 @@ test("digit-opened and space-containing bodies are still math", () => {
 // `refusedDollarIsAnOpener` in plugin/scripts/scan.js.
 // ---------------------------------------------------------------------------
 
+// rule: DP-refused-nested
 test("REPRO: a leading price must not swallow space-separated math", () => {
 	const text = "cost $5, that will be $x+5$";
 	const result = findMathSpans(text);
@@ -458,6 +471,7 @@ test("REPRO: a leading price must not swallow space-separated math", () => {
 	);
 });
 
+// rule: DP-refused-nested
 test("REPRO: price, math and a trailing price still converts the math", () => {
 	const text = "cost $5, be $x+5$ and $10";
 	const result = findMathSpans(text);
@@ -475,6 +489,7 @@ test("CONTROL: the same sentence without the price converts unchanged", () => {
 	assert.deepStrictEqual(result.warnings, []);
 });
 
+// rule: DP-refused-currency
 test("CONTROL: a US price and a European 20$ never pair into one equation", () => {
 	// The currency refusal must never be re-offered: otherwise a `$N` price and a
 	// later `N$` become one equation out of two prices, which is deleted prose
@@ -506,6 +521,7 @@ test("CONTROL: $10-$20 yields one guarded warning and no phantom", () => {
 	);
 });
 
+// rule: DP-refused-nested
 test("CONTROL: re-offering happens only when the refused $ actually closes", () => {
 	// Whitespace guard fires, so the `$` is eligible for re-offering -- but it has
 	// no closer of its own. Without the nested-close condition this gains a
@@ -518,6 +534,7 @@ test("CONTROL: re-offering happens only when the refused $ actually closes", () 
 	);
 });
 
+// rule: DP-refused-currency/loss-1 — the accepted loss this rule buys.
 test("ACCEPTED: a compact $10$ behind a price stays text (measured)", () => {
 	// Deliberate, not an oversight: currency refusals are never re-offered, so
 	// this real expression behind a price is left alone. A missed span stays
@@ -531,6 +548,7 @@ test("ACCEPTED: a compact $10$ behind a price stays text (measured)", () => {
 	);
 });
 
+// rule: DP-refused-nested — a nested refusal still counts as a candidate.
 test("CONTROL: a nested refusal reports the orphan, not the price behind it", () => {
 	// `findDollarClose` for the refused `$` in `$x` lands on `$10`, which the
 	// currency guard refuses. Re-offering is still right: the loop then reports
@@ -562,12 +580,14 @@ test("CONTROL: a nested refusal reports the orphan, not the price behind it", ()
 // the defence the spec demanded: the odd run must not eat `$z$` behind it.
 // ---------------------------------------------------------------------------
 
+// rule: DP-closer-w
 test("REPRO row 1: $x$y$ pairs the first expression and leaves the orphan visible", () => {
 	const result = findMathSpans("$x$y$");
 	assert.deepStrictEqual(latexOf(result), ["x"], "first open, first close");
 	assert.deepStrictEqual(result.warnings, [], "the orphan is a trailing `$`, not a guard refusal");
 });
 
+// rule: DP-closer-w
 test("REPRO row 1: the odd run never eats the good $z$ behind it", () => {
 	const result = findMathSpans("$x$y$ and $z$");
 	assert.deepStrictEqual(latexOf(result), ["x", "z"]);

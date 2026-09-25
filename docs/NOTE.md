@@ -27,9 +27,10 @@ a newcomer:
 5. **§3** — what has been proven live, including the row-1/row-2 repro pass (2026-09-23).
 6. **§4** — test layout: which file defends which rule.
 
-The `$...$` pairing rules (§1.8, the `closerIsAlsoAnOpener` row) are implemented with matching
-condition letters in `plugin/scripts/scan.js` and pinned by REPRO/CONTROL/ACCEPTED fixtures in
-`tests/scan.test.js` — the fixture names are the map from test to rule.
+The `$...$` pairing rules are owned by one decision record,
+[`docs/adr/0001-dollar-pairing.md`](adr/0001-dollar-pairing.md): the §1.8 rows, the `scan.js`
+docblocks and the REPRO/CONTROL/ACCEPTED fixtures each carry a rule ID and point there, and
+`tests/rules.test.js` fails the suite when any of them drifts.
 
 ## 1. Host facts that decide the design
 
@@ -213,8 +214,8 @@ Guard decisions taken while auditing the four delimiter branches (each one is a 
 | An opener followed by whitespace or by punctuation | **not a span** (`CANNOT_START_MATH` = `)]},.;:?!%'"`, plus the whitespace rule). Pinned by fixtures for both, with the deliberate counter-example `Note($i$)` — an *opening* bracket after the opener is still math. |
 | An opener with **no rule about the character before it** | **accepted**, deliberately. `x$y$z` and `f(x)$=y$` are read as math. A preceding-character rule would also reject `text=$x$`, which an author plausibly writes; the guard is not extended without a demonstrated failure. Pinned as a fixture so a later change has to face the decision. |
 | A closer a guard refused | reported as `guarded-inline-dollar`, **not** `unterminated-inline-dollar`, and the loop steps past the refused `$` so it is not re-read as an opener. Before: a page of prices produced one bogus "unterminated" per `$` and the report's *Malformed delimiters* line was noise. Genuinely unmatched openers (`Pay $100 now.`) still report as malformed. |
-| A candidate closer that is **itself an opener** (`closerIsAlsoAnOpener`) | **refuses the closer and abandons the *earlier* opener**, warning `guarded-inline-dollar` and advancing by **one**, never past the candidate, so the outer loop re-reads it as the opener it is. Reported by a reader of `DesktopEditors#2062`: the guards only ever inspected the candidate, never the `$` being taken from someone else, so `It costs $5, and the value=$x$ here.` converted `$5, and the value=$` and left `x$ here.` as prose **with no warning** — correct math eaten, which is worse than a dubious span. Five conditions, each covering a case the others miss: **(0)** the current body is non-empty, so `empty-span` keeps its diagnosis for `$$x$` with display off (the outer loop advances by one there anyway, so the rule is unneeded); **(a)** the candidate can start math; **(b)** an **even** count of unescaped `$` remains from it — parity is what keeps `$a$and$b$` as two spans (remainder 3), and a suffix array makes the test O(1) instead of quadratic; **(w)** the earlier opener's body contains **whitespace** — a stray `$` that swallowed prose. On a spaceless body both candidate pairings are token-local, so reading order decides (first open, first close, TeX's rule): `$x$y$` pairs `x` and leaves the trailing `$` visible instead of promoting the prose token `y` to math — row 1's semantic defect, measured live (the row's literal "single math-italic xy" symptom was a stale build and is **unproven** on the current one). This is the *inverse* of the rejected alternative below: there the body's shape was meant to identify the stealing opener; here a spaceless body *vetoes* abandoning it; **(c)** a nested close succeeds with a non-empty body, since firing where the later `$` is currency-guarded (`$5 and$x$10`) would yield nothing. Rejected alternatives, both measured: refusing a *digit-opened* span kills `$5$` and `$2 + 3$`; requiring a spaceless body does not catch `value=$x$` at all. |
-| A **refused** `$` that is a legitimate opener (`refusedDollarIsAnOpener`) | The guarded arm used to step past its refused `$` unconditionally (`i = closeInline.index + 1`), which on `cost $5, that will be $x+5$` landed **past the `$` that opens `$x+5$`** — the sentence converted nothing while reporting one guarded warning. Isolating the expression into its own paragraph "fixed" it only because the price is then not in the per-paragraph scan. Root cause: the arm equated *"not a closer"* with *"not an opener"*. The whitespace rule itself stays (§1.8's `Costs $5 and $6…` decision depends on it) — the **reaction** now branches. Three conditions: **(currency)** never re-offer when the digit guard fired (`findDollarClose` checks the digit first, so this names the guard exactly) — without it `cost $5, then $10 and 20$ here` becomes `$10 and 20$`, one equation from two prices; **(canStart)** kept despite being provably redundant (`i = i + 1` and `i = refused + 1` both land on `refused + 1` when it fails) because it states the intent at the decision point; **(nested close)** requires a nested candidate **with a non-empty body**, else `cost $5, see $blah and more` gains a phantom `unterminated` beside the guarded one — the invariant the step-past exists for. A nested result that is *itself* guarded **still counts**: refusing there would walk past `$x` in `cost $5, see $x and $10` and then call the trailing price `unterminated`, hiding a real attempt while reporting a price as malformed — the opposite of what the malformed bucket is for (this branch was caught by the phase-8 code review, was not in the original plan, and has its own fixture). Parity is deliberately *not* applied here (unlike `closerIsAlsoAnOpener`): the current opener has already produced nothing, so an odd remainder would wrongly refuse `cost $5, be $x+5$ and $10`. **Accepted cost:** `cost $5, and $10$ is wrong` stays text — a missed span is visible prose, a wrong span is not. **Ablations, re-measured against the 128-test suite:** dropping the currency check → **126/128** (its own two fixtures); restoring `|| nested.guarded` → **127/128** (its own fixture); the naive "always resume one step" → **122/128, six failures of which exactly one is pre-existing** (`a guard rejection is reported as guarded, not as a malformed delimiter`), so the invariant is enforced by a test that already existed. |
+| A candidate closer that is **itself an opener** (`closerIsAlsoAnOpener`) | **Refuses the closer and abandons the *earlier* opener**, warning `guarded-inline-dollar` and advancing by one so the outer loop re-reads the candidate as the opener it is — conditions `DP-closer-0`, `DP-closer-a`, `DP-closer-b`, `DP-closer-w`, `DP-closer-c`; rejected alternatives `DP-closer-b/rej-digit-opened`, `DP-closer-w/rej-spaceless-body`. Rationale, counter-examples and dated ablations: [`docs/adr/0001-dollar-pairing.md`](adr/0001-dollar-pairing.md). |
+| A **refused** `$` that is a legitimate opener (`refusedDollarIsAnOpener`) | **Re-reads the refused `$` as an opener** instead of stepping past it, so `cost $5, that will be $x+5$` converts `$x+5$` while `$10-$20` keeps one guarded warning and no phantom — conditions `DP-refused-currency`, `DP-refused-canStart`, `DP-refused-nested`; accepted loss `DP-refused-currency/loss-1`. Rationale, counter-examples and dated ablations: [`docs/adr/0001-dollar-pairing.md`](adr/0001-dollar-pairing.md). |
 
 `aligned` was removed from the read command in the same pass: it was a per-paragraph comparison nothing
 read, and keeping a field that *looks* like a gate is how §1.7 happened.
@@ -475,7 +476,10 @@ roots reinstalled `rm -rf` + `cp -a` (`diff -r` clean). `Debugger.getScriptSourc
 
 ## 4. Test layout
 
-`node --test tests/` → 132 tests (128 through phase 8, +3 red-first repro fixtures, +1 keystroke pin).
+`node --test tests/` runs the whole directory: the delimiter core plus the fixtures added red-first
+for the two repro rows and the keystroke property, the harness mirrors, and the rule map. Dated
+counts live only in [`docs/adr/0001-dollar-pairing.md`](adr/0001-dollar-pairing.md)'s Evidence
+section; `tests/rules.test.js` keeps live counts out of this file and the README.
 
 * `scan.test.js` — the delimiter core: escapes, currency guard, `$$` precedence, unterminated spans,
   the blank-line rule, the guard decisions (a whitespace-preceded closer abandons its opener without
@@ -509,6 +513,10 @@ roots reinstalled `rm -rf` + `cp -a` (`diff -r` clean). `Debugger.getScriptSourc
   silenced-by-default report.
 * `icons.test.js` / `png.js` — every icon slot exists at all five scales as a valid, non-blank PNG
   (a minimal PNG decoder, so the check is host-independent).
+* `rules.test.js` — the dollar-pairing drift check: every `DP-*` token in code and docs exists in
+  the [`docs/adr/0001-dollar-pairing.md`](adr/0001-dollar-pairing.md) manifest, every manifest ID has
+  a `// rule:`-annotated fixture in `scan.test.js`, and neither the README nor this file states a
+  numeric test count.
 * `report.test.js` — the report payload survives the host's URL mangling and corrupted input.
 
 ## 5. Upstream: the same gap, and where it is tracked
@@ -587,7 +595,7 @@ Vocabulary is the `codebase-design` one: **module**, **interface**, **depth**, *
 | 1 | One owner for "where is this span in the document" | **Strong** | The char-offset ↔ position mapping is implemented in five mutually-referential places (scan.js `positionOf`, code.js `RESOLVE_BODY`, commands.js guard, fake-editor geometry, README + §1.7). The pure scanner documents the glue's data format. The row-2 drift bug lived exactly here and passed every scan test. |
 | 2 | Split `code.js` at its own section banners | Worth exploring | 1232 lines, six fused concerns; `convertSelection` interleaves policy, report wording and orchestration; `verify()` is reachable only from inside its promise chain. |
 | 3 | One owner for "run this in the editor page" | Worth exploring | `RESOLVE_BODY` is orphaned in code.js while its siblings live in commands.js; the string-body seam compiles against a `PRELUDE` the bodies cannot see; the harness runs commands *synchronously*, so the real timeout/clobber/unparsable behaviour is untested. |
-| 4 | One decision record for the dollar-pairing rules | **Strong** (docs only) | The five + three conditions are prose in four places; ablation counts in §1.8 say "128" where the suite is 132. Rule IDs in code + a fixture↔rule map would make drift mechanical to catch. |
+| 4 | One decision record for the dollar-pairing rules | **Strong** (docs only) | The five + three conditions are prose in four places and kept in sync by hand; the ablation counts restated in §1.8 go stale whenever the suite moves. Rule IDs in code + a fixture↔rule map would make drift mechanical to catch. |
 | 5 | Doubles declare which host contracts they mirror | Speculative | `plugin-harness.js` / `fake-editor.js` mix measured host behaviour with conveniences (the synchronous `callCommand` is *friendlier* than the real seam); a host upgrade leaves every test green. |
 | 6 | One owner of the report record shape | Worth exploring | `makeReport`/`reportLine` produce the payload, `report.js` consumes it, `report.test.js` hand-builds it — no shared definition, so producer/consumer can drift silently. |
 
@@ -598,4 +606,7 @@ pure and injectable; the ablation methodology (drop a condition, count failures)
 the guard rules honest.
 
 Doc updates from this pass: README gained a *Code map* (four script files, the two coordinate
-systems, where to look first); this note gained a *How to read this note* map above §1.
+systems, where to look first); this note gained a *How to read this note* map above §1. Candidate 4
+landed 2026-09-25: [`docs/adr/0001-dollar-pairing.md`](adr/0001-dollar-pairing.md) is the sole owner
+of the dollar-pairing prose, the §1.8 rows and `scan.js` docblocks carry rule IDs as pointers, and
+`tests/rules.test.js` fails on drift.

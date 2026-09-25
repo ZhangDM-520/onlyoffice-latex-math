@@ -117,9 +117,10 @@
 	 *                            were full of malformed delimiters.
 	 *   `{index: n, guarded: false}`  a usable closer.
 	 *
-	 * The refused index is returned so the caller can step *past* it: a `$` a guard
-	 * has just rejected as a closer must not be immediately re-offered as an
-	 * opener, or `$10-$20` reports one guarded span and one phantom unterminated one.
+	 * The refused index is returned so the caller can step *past* it: re-offering
+	 * a refused `$` would let `$10-$20` report one guarded span and one phantom
+	 * unterminated one. The exceptions to that default are owned by
+	 * `refusedDollarIsAnOpener` (docs/adr/0001-dollar-pairing.md).
 	 */
 	function findDollarClose(text, from, options) {
 		for (var i = from; i < text.length; i++) {
@@ -143,53 +144,12 @@
 
 	/**
 	 * True when a `$` a guard has just *refused as a closer* should nevertheless
-	 * be re-read as an opener.
+	 * be re-read as an opener, instead of stepping past it. The rule prose is
+	 * owned by docs/adr/0001-dollar-pairing.md; the lines below are its manifest.
 	 *
-	 * The invariant behind stepping past a refused `$` is sound, and the comment on
-	 * `findDollarClose` states it: re-offering a refused `$` would let `$10-$20`
-	 * report a guarded span *plus* a phantom `unterminated-inline-dollar`. It fails
-	 * when the refusal came from the **whitespace** guard rather than the currency
-	 * one, because then the refused `$` may be the opener of a real expression. On
-	 * `cost $5, that will be $x+5$` the candidate closer is the `$` before `x`,
-	 * refused only because a space precedes it, and stepping past it skips that
-	 * opener entirely -- the sentence converts to nothing while reporting one
-	 * guarded warning. Isolating `$x+5$` into its own paragraph "fixes" it purely
-	 * by removing the price from the scan.
-	 *
-	 * Three conditions, each doing work the others cannot:
-	 *
-	 *   (currency) a refusal where the next character is a digit is a *price* and is
-	 *       never re-offered. `findDollarClose` checks the digit first, so this
-	 *       identifies exactly which guard fired. Without it, a US-style price pairs
-	 *       with a European-style suffix into one equation out of two prices
-	 *       (`cost $5, then $10 and 20$ here` -> `$10 and 20$`), which is the worst
-	 *       outcome this scanner can produce: deleted prose, no rollback. It also
-	 *       costs `cost $5, and $10$ is wrong`, where `$10$` is real math behind a
-	 *       price -- accepted deliberately and pinned as a test, because a missed
-	 *       span stays visible text while a wrong one does not;
-	 *   (canStart) whether the refused `$` can start math. Kept deliberately for
-	 *       readability even though it is behaviourally redundant: when it is false,
-	 *       visiting `refused` as an opener is impossible, so `i = i + 1` and
-	 *       `i = refused + 1` both land on `refused + 1`. It names the intent where
-	 *       the decision is taken instead of leaving it to be re-derived from the
-	 *       loop below;
-	 *   (nested close) a nested `findDollarClose` must have found *some* candidate
-	 *       with a non-empty body, so re-offering is worth the re-read. Without a
-	 *       candidate at all, `cost $5, see $blah and more` gains a phantom
-	 *       `unterminated` beside the guarded one -- the exact failure the invariant
-	 *       exists to prevent. Note that a nested result which is *itself* guarded
-	 *       still counts as a candidate: refusing here would walk past `$x` in
-	 *       `cost $5, see $x and $10` and then call the trailing price
-	 *       `unterminated`, hiding a real attempt while reporting a price as
-	 *       malformed -- the opposite of what the malformed bucket is for. The
-	 *       span decision is never taken from this helper; it only decides where
-	 *       the loop resumes, and the normal guards apply from there.
-	 *
-	 * Parity (`dollarFrom`) is deliberately NOT applied here, unlike
-	 * `closerIsAlsoAnOpener`: there it decides which of two competing openers is the
-	 * odd one out, whereas here the current opener has already produced nothing, so
-	 * abandoning it costs no span -- and an odd remainder would wrongly refuse
-	 * `cost $5, be $x+5$ and $10`, where `$x+5$` is followed by a third price.
+	 *   DP-refused-currency  the digit guard fired: a price, never re-offered;
+	 *   DP-refused-canStart  the refused `$` can start math (intent, redundant);
+	 *   DP-refused-nested    a nested close exists with a non-empty body.
 	 *
 	 * @param {string} text
 	 * @param {number} refused index of the `$` the guard refused.
@@ -213,50 +173,14 @@
 
 	/**
 	 * True when the candidate `closer` should be read as an **opener** in its own
-	 * right, abandoning the span whose closer it currently is.
+	 * right, abandoning the span whose closer it currently is. The rule prose is
+	 * owned by docs/adr/0001-dollar-pairing.md; the lines below are its manifest.
 	 *
-	 * Without this, an unmatched `$` earlier in the sentence steals the opening
-	 * delimiter of a real expression that follows: `It costs $5, and the
-	 * value=$x$ here.` converted `$5, and the value=$` to math and left `x$ here.`
-	 * as prose, with no warning at all — the closer guards only ever inspected the
-	 * candidate itself, never the `$` being taken from someone else.
-	 *
-	 * All five conditions are required; each one covers a case the others miss:
-	 *
-	 *   (0) the current opener's body is non-empty, so it would have produced a
-	 *       span at all. When the body is empty `pushSpan` reports `empty-span`,
-	 *       which is the accurate diagnosis for `$$x$` with display switched off —
-	 *       and the outer loop advances by one anyway, so the later `$` is re-read
-	 *       as an opener without this rule's help. Firing first would merely
-	 *       relabel a real condition;
-	 *   (a) the `$` at `closer` can actually start a span, so there is something to
-	 *       reinterpret (`$x$ costs $5.` must not fire: the candidate is followed
-	 *       by a space and has nothing to open);
-	 *   (b) an **even** count of unescaped `$` remains from `closer`, so that `$`
-	 *       has a natural partner ahead and the *current* opener is the odd one
-	 *       out. This is what keeps `$a$and$b$` as two spans — there the remainder
-	 *       is 3, and reinterpreting would cost a real span to make one bogus one;
-	 *   (w) the current opener's body contains **whitespace**, so the opener is an
-	 *       unmatched `$` that has swallowed prose. On a spaceless body both
-	 *       candidate pairings are token-local and reading order decides instead —
-	 *       first open, first close, the rule TeX follows: `$x$y$` pairs `x` and
-	 *       leaves the trailing `$` visible, rather than promoting the prose token
-	 *       `y` to math and stranding the author's `$x$` (live repro row 1). Every
-	 *       steal this rule exists for has a whitespace-bearing body
-	 *       (`"$5, and the value="`), so all pinned cases still fire. This is the
-	 *       inverse of the rejected "spaceless body" alternative recorded below:
-	 *       there the body's shape was meant to *identify* the stealing opener;
-	 *       here a spaceless body *vetoes* abandoning it, because no prose can be
-	 *       being swallowed;
-	 *   (c) the nested probe actually closes with a non-empty body, so abandoning
-	 *       the current opener yields a span rather than nothing (on
-	 *       `$5 and$x$10` the later `$` is currency-guarded, and firing would be
-	 *       strictly worse than today).
-	 *
-	 * Rejected alternatives, both measured: refusing a *digit-opened* span kills
-	 * `$5$` and `$2 + 3$`; requiring a spaceless body does not catch `value=$x$`
-	 * at all. `$` in prose is simply not decidable by one character rule, which is
-	 * why conversion stays scoped to the author's selection.
+	 *   DP-closer-0  the current opener's body is non-empty, so it held a span;
+	 *   DP-closer-a  the candidate can start math, so there is something to open;
+	 *   DP-closer-b  an even count of unescaped `$` remains from the candidate;
+	 *   DP-closer-w  the current body has whitespace (why, at the check below);
+	 *   DP-closer-c  a nested close succeeds with a non-empty body.
 	 *
 	 * @param {string} text
 	 * @param {number} opener index of the `$` being scanned.
@@ -275,12 +199,11 @@
 		if (dollarFrom[closer] % 2 !== 0) {
 			return false;
 		}
-		// (w) A spaceless body is a token, not prose: both candidate pairings are
-		// token-local, so reading order decides - first open, first close - and
-		// this rule must not steal the pair TeX would make (`$x$y$` pairs `x`).
-		// That is row 1's semantic defect, measured live; the row's literal
-		// "single math-italic xy" symptom was a stale build and is unproven on
-		// the current one. Every real steal has a whitespace-bearing body.
+		// DP-closer-w: a spaceless body is a token, not prose - both candidate
+		// pairings are token-local, so reading order decides (first open, first
+		// close, the rule TeX follows) and this rule must not steal the pair TeX
+		// would make: `$x$y$` pairs `x`, leaving the trailing `$` visible. Every
+		// real steal this rule exists for has a whitespace-bearing body.
 		if (!/\s/.test(body)) {
 			return false;
 		}

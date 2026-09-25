@@ -3,6 +3,8 @@
  * pipeline can be exercised headlessly: menu registration, the read/apply
  * commands running against the simulated editor, the report payload and the
  * hotkey handler.
+ *
+ * Host contract: Desktop Editors 9.4.0.130-1, editors/sdkjs-plugins/{pluginBase.js,v1/plugins.js}
  */
 "use strict";
 
@@ -75,12 +77,15 @@ function createHarness(editor, options) {
 	Matcher.prototype.attachOnClick = function (handler) {
 		this.onClick = handler;
 	};
+	// CONVENIENT: synthetic shortcut - the host offers no click(); a real chord is
+	// two key events and the injected router is what reaches onClick.
 	Matcher.prototype.click = function () {
 		if (this.onClick) {
 			return this.onClick();
 		}
 		return undefined;
 	};
+	// MIRROR(toItem, 9.4.0.130-1):
 	// Mirrors the shipped `toItem` (`pluginBase.js`) in the one respect this
 	// plugin depends on: `items` is emitted **only** when the node has children
 	// (`this.menu && (a.items = ...)`). A childless item is therefore a plain row
@@ -101,6 +106,7 @@ function createHarness(editor, options) {
 		}
 		return item;
 	};
+	// MIRROR(showOnOptionsType, 9.4.0.130-1):
 	// Mirrors Asc.ButtonContextMenu / ButtonToolbar in the shipped v1/plugins.js:
 	// `showOnOptionsType` starts empty and the host only offers the item when the
 	// live context type matches a checker (or a checker is the literal "All").
@@ -125,6 +131,7 @@ function createHarness(editor, options) {
 	}
 	ButtonToolbarItem.prototype = Object.create(Matcher.prototype);
 	ButtonToolbarItem.prototype.constructor = ButtonToolbarItem;
+	// MIRROR(r.prototype.toItem, 9.4.0.130-1):
 	// `r.prototype.toItem` stamps the item type on top of the shared projection.
 	ButtonToolbarItem.prototype.toItem = function () {
 		var item = Matcher.prototype.toItem.call(this);
@@ -132,6 +139,7 @@ function createHarness(editor, options) {
 		return item;
 	};
 
+	// MIRROR(ButtonContextMenu.prototype.onContextMenuShow, 9.4.0.130-1):
 	// Reproduces `ButtonContextMenu.prototype.onContextMenuShow` from the shipped
 	// v1/plugins.js, including the detail that made the live menu dead: the host
 	// recurses into `childs` through the *same* checker gate, so a child with an
@@ -169,6 +177,7 @@ function createHarness(editor, options) {
 		return { items: items };
 	};
 
+	// MIRROR(r.prototype.toToolbar, 9.4.0.130-1):
 	// Reproduces `r.prototype.toToolbar` from the shipped v1/plugins.js: a root with
 	// `parent === null` becomes the **tab** and its own `toItem()` is never emitted,
 	// so every ribbon button is a child of the root. That is why a plugin cannot
@@ -210,6 +219,7 @@ function createHarness(editor, options) {
 		this.show = function (variation) {
 			harness.windows.push({ id: self.id, variation: variation });
 		};
+		// MIRROR(PluginWindow.prototype.close, 9.4.0.130-1):
 		// Mirror of PluginWindow.prototype.close(): executeMethod("CloseWindow").
 		this.close = function () {
 			harness.windowCloses.push(self.id);
@@ -226,6 +236,10 @@ function createHarness(editor, options) {
 				return text;
 			},
 			executeMethod: function () {},
+			// CONVENIENT (async seam collapsed to sync): the real host answers
+			// callCommand asynchronously; collapsing the seam here lets tests assert
+			// state immediately after an action. Behaviour of the command itself is
+			// unchanged.
 			// The real host stringifies the command and evaluates it inside the
 			// editor page, so the harness recompiles the source in the simulated
 			// editor realm instead of calling it in the test realm.
@@ -315,6 +329,7 @@ function createHarness(editor, options) {
 		windowStub.editor = editor.editorApi;
 	}
 
+	// MIRROR(window.parent frame chain, 9.4.0.130-1):
 	// The plugin's background frame is a child frame in the editor window, so it can
 	// reach the editor's own document through `parent.document` - measured live
 	// against 9.4.0.130-1 (plan section 2.2). The chain is modelled here so the
@@ -348,6 +363,8 @@ function createHarness(editor, options) {
 	apiFrame.parent = apiFrame;
 	windowStub.parent = editorFrame;
 
+	// CONVENIENT: an invented stress-host shape, not a measured 9.4.0.130-1
+	// behaviour - the knob exists so the plugin's degradation path is testable.
 	// A host that keeps plugins on an opaque origin: every reach into the parent
 	// throws, and the plugin must degrade instead of breaking.
 	if (options.parentAccessThrows) {
@@ -414,6 +431,7 @@ function createHarness(editor, options) {
 	harness.releaseKey = function (spec) {
 		return dispatchKey("keyup", spec);
 	};
+	// MIRROR(key event delivery, 9.4.0.130-1):
 	// The chord as the host actually delivers it: the modifier keydown, then the
 	// bound key carrying no modifier flag at all, then the keyups.
 	harness.pressAltChord = function (code, key) {
