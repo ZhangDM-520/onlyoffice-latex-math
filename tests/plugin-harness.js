@@ -28,6 +28,12 @@ var REPORT_RECORD_SOURCE = fs.readFileSync(
 	path.join(__dirname, "..", "plugin", "scripts", "report-record.js"),
 	"utf8"
 );
+// hotkeys.js / report-text.js / settings.js - same deal: plain scripts of the
+// fake plugin frame, before code.js (index.html's order). One wiring line per
+// UMD module the plugin frame loads.
+var HOTKEYS_SOURCE = fs.readFileSync(path.join(__dirname, "..", "plugin", "scripts", "hotkeys.js"), "utf8");
+var REPORT_TEXT_SOURCE = fs.readFileSync(path.join(__dirname, "..", "plugin", "scripts", "report-text.js"), "utf8");
+var SETTINGS_SOURCE = fs.readFileSync(path.join(__dirname, "..", "plugin", "scripts", "settings.js"), "utf8");
 
 function createStorage() {
 	var data = {};
@@ -518,6 +524,9 @@ function createHarness(editor, options) {
 	vm.createContext(context);
 	vm.runInContext(COMMANDS_SOURCE, context, { filename: "commands.js" });
 	vm.runInContext(REPORT_RECORD_SOURCE, context, { filename: "report-record.js" });
+	vm.runInContext(HOTKEYS_SOURCE, context, { filename: "hotkeys.js" });
+	vm.runInContext(REPORT_TEXT_SOURCE, context, { filename: "report-text.js" });
+	vm.runInContext(SETTINGS_SOURCE, context, { filename: "settings.js" });
 	vm.runInContext(CODE_SOURCE, context, { filename: "code.js" });
 
 	return {

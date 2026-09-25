@@ -198,16 +198,24 @@ node --test tests/          # the full suite: scanner, placement, icons, hotkeys
 
 ### Code map
 
-The chain a conversion travels: `code.js` (orchestration) → `locate.js` (span placement) →
+The chain a conversion travels: `code.js` (the pipeline) → `locate.js` (span placement) →
 `scan.js` (pure scanner) → `commands.js` (the editor-page seam) — with `report-record.js` (the
 report record both sides share) and `report.js` (the report window's own page script) on the
-reporting side.
+reporting side. `hotkeys.js`, `report-text.js` and `settings.js` are code.js's pure satellites:
+the matcher, the report wording, the settings record.
+
+`convertSelection` is a pipeline — `read → decide → plan → apply → verify → render`. The stages
+only sequence; the policy (a collapsed caret is a no-op, "select first", "no delimiters enabled")
+is the pure `decide(snapshot, settings)`, and every word of the report is `report-text.js`'s.
 
 | File | Lines | What it owns |
 | :--- | ---: | :--- |
 | `plugin/scripts/scan.js` | ~450 | The pure core: delimiter rules, pairing decisions (`closerIsAlsoAnOpener`, `refusedDollarIsAnOpener`, owned by `docs/adr/0001-dollar-pairing.md`), span detection in the character domain — paragraph-relative offsets only, never document positions. No editor API calls, fully testable headlessly. |
 | `plugin/scripts/locate.js` | ~370 | Span placement, and the only owner of char offset ↔ document position. `plan()` brackets the editor-side probe (the `resolve` seam) with two pure passes, falls back to arithmetic where nothing was proven, verifies every probe map before believing it (`verifiedPositions`), and tags each operation `placement: "probed"\|"arithmetic"`. |
-| `plugin/scripts/code.js` | ~1080 | Everything else: settings, menu publication, hotkeys, `convertSelection` (read → plan → apply → verify → report), report windows. Not "thin glue" — it is the majority of the plugin and the file to open first when behaviour surprises you. |
+| `plugin/scripts/code.js` | ~810 | The composition root: the live settings object, menu publication (ribbon + right-click), the hotkey DOM lifecycle, the report windows, and the conversion pipeline (`read → decide → plan → apply → verify → render`). The stages only sequence; policy is the pure `decide`, wording is `report-text.js`'s, and `resolveSpanPositions` is the one adapter that wires the `resolve` seam into `locate.plan`. The file to open first when behaviour surprises you. |
+| `plugin/scripts/hotkeys.js` | ~210 | The hotkey rule set: `createHotkeyMatcher`, the binding/modifier tables and the chord-timing window — pure and injectable (events plus a `now` in, a binding out), so the rules are testable without a browser. Its header carries the measurement that shaped them (a chord arrives with every modifier flag false). The DOM lifecycle — the `window.parent` walk, the capture listeners, the swallow — stays in code.js. |
+| `plugin/scripts/report-text.js` | ~200 | Every line a report says, and the bucketing that decides which line says it. Wording *is* policy: "a guard is not malformed" is why warnings split into `Malformed delimiters` vs `Left as text by a guard`, and that rule lives here next to the words. Pure (the translator is injected); the record shape is `report-record.js`'s, the window lifecycle code.js's. |
+| `plugin/scripts/settings.js` | ~110 | The stored settings record and what the scanner reads from it: `loadSettings`/`saveSettings` (the storage is injected, so the module never touches the window), `scannerOptions`, `enabledDelimiterCount`. The stale-record rule — a record from before the report window was silenced may not keep `openReport` — is behaviour, and lives in `loadSettings`. |
 | `plugin/scripts/commands.js` | ~400 | The whole "run this in the editor page" seam: self-contained command bodies compiled by `makeCommand` from string sources against a shared `PRELUDE`, and `run(name, payload)` — one serialised `Asc.plugin.callCommand` in flight over the shared `Asc.scope` payload slot, with result parsing and the error taxonomy (`timeout`\|`unparsable-command-result`\|`clobbered`\|`callCommand-unavailable`\|`callCommand-threw: …`). Holds the `text-mismatch` safety net (`APPLY_BODY`) and the char → position probe (`RESOLVE_BODY`). |
 | `plugin/scripts/report-record.js` | ~100 | The report record: its field layout and its URL serialization — the seam between the plugin frame and the report window's page (`make`/`encode` for the producer `code.js`, `decode`/`textOf` for the consumer `report.js`, neither of which knows the fields). Loaded by script tag in **both** realms (`index.html`, `report.html`) and realm-safe — it registers nothing. Its header is also the one description of the report window's close lifecycle. |
 | `plugin/scripts/report.js` | ~140 | The report window's page script: rendering the decoded record, copy-to-clipboard, the page half of the close protocol (described once in `report-record.js`'s header). Deep for its size — it hides real host quirks (the `windowID` XHR race, clipboard refusals). |

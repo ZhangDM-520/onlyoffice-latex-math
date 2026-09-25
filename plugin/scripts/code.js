@@ -11,7 +11,11 @@
  *                  them (payload handoff, answer parsing, timeout taxonomy)
  *   - report-record.js  the report record shape and its URL serialization (the
  *                  seam into the report window's page)
- *   - code.js      this file: settings, menus, hotkeys, orchestration, reporting
+ *   - hotkeys.js   the pure hotkey matcher and its binding/modifier tables
+ *   - report-text.js  the report's wording (a guard is not malformed)
+ *   - settings.js  the stored settings record and the derived scanner options
+ *   - code.js      this file: the live settings object, menus, hotkey lifecycle,
+ *                  orchestration, report windows
  */
 (function (window) {
 	"use strict";
@@ -20,33 +24,25 @@
 	var commands = window.OnlyOfficeLatexMathCommands;
 	var locate = window.OnlyOfficeLatexMathLocate;
 	var reportRecord = window.OnlyOfficeLatexMathReportRecord;
+	var hotkeys = window.OnlyOfficeLatexMathHotkeys;
+	var reportText = window.OnlyOfficeLatexMathReportText;
+	var settingsModule = window.OnlyOfficeLatexMathSettings;
 
-	if (!core || !commands || !locate || !reportRecord) {
+	if (!core || !commands || !locate || !reportRecord || !hotkeys || !reportText || !settingsModule) {
 		// Loading order problem: fail loudly instead of silently doing nothing.
-		console.error("[latex-math] scan.js / commands.js / locate.js / report-record.js missing");
+		console.error(
+			"[latex-math] scan.js / commands.js / locate.js / report-record.js / hotkeys.js / report-text.js / settings.js missing"
+		);
 		return;
 	}
 
-	var SETTINGS_KEY = "onlyoffice-latex-math.settings";
-	// Bumped when a stored default must not survive: 2 silenced the report window.
-	var SETTINGS_VERSION = 2;
 	// Upper bound on how long the plugin waits for the host to confirm that the
 	// editor shell is up before publishing the menus anyway.
 	var PUBLISH_BACKSTOP_MS = 1500;
 
-	// Everything here is reachable from the ribbon tab; a stored key with no UI
-	// would be a setting nothing can change, so `currencyGuard` is a constant in
-	// `scannerOptions` instead.
-	var DEFAULT_SETTINGS = {
-		inlineDollar: true,
-		displayDollar: true,
-		inlineParen: true,
-		displayBracket: true,
-		openReport: false
-	};
-
 	// One list behind the four delimiter toggles: their labels, their icon slots
-	// and the order `updateMenuLabels` refreshes them in.
+	// and the order `updateMenuLabels` refreshes them in. The key names are
+	// settings.js's DELIMITER_KEYS; what lives here is presentation only.
 	var DELIMITER_TOGGLES = [
 		{ key: "inlineDollar", label: "$...$", icon: "inline-dollar" },
 		{ key: "displayDollar", label: "$$...$$", icon: "display-dollar" },
@@ -54,6 +50,10 @@
 		{ key: "displayBracket", label: "\\[...\\]", icon: "display-bracket" }
 	];
 
+	// The live settings object. settings.js owns the record, its defaults and
+	// the derived scanner options (the storage is passed in there, never
+	// reached for); this is the copy the menus mutate and `getSettings` hands
+	// to the dev console.
 	var settings = null;
 	var lastReport = null;
 	var reportWindow = null;
@@ -77,77 +77,8 @@
 	}
 
 	/* ------------------------------------------------------------------ *
-	 * Settings
-	 * ------------------------------------------------------------------ */
-
-	function loadSettings() {
-		var loaded = {};
-		try {
-			loaded = JSON.parse(window.localStorage.getItem(SETTINGS_KEY) || "{}") || {};
-		} catch (e) {
-			loaded = {};
-		}
-		// Records written before the report window was silenced carry no version.
-		// Their `openReport: true` would keep the old behaviour forever, so a
-		// stale record may not decide `openReport` - the delimiter choices are
-		// still the owner's and are kept.
-		var stale = loaded.version !== SETTINGS_VERSION;
-		var merged = {};
-		Object.keys(DEFAULT_SETTINGS).forEach(function (key) {
-			if (stale && key === "openReport") {
-				merged[key] = DEFAULT_SETTINGS[key];
-				return;
-			}
-			merged[key] = typeof loaded[key] === "boolean" ? loaded[key] : DEFAULT_SETTINGS[key];
-		});
-		return merged;
-	}
-
-	function saveSettings() {
-		try {
-			var record = { version: SETTINGS_VERSION };
-			Object.keys(DEFAULT_SETTINGS).forEach(function (key) {
-				record[key] = settings[key];
-			});
-			window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(record));
-		} catch (e) {
-			console.error("[latex-math] cannot persist settings", e);
-		}
-	}
-
-	function scannerOptions() {
-		return {
-			delimiters: {
-				inlineDollar: settings.inlineDollar,
-				displayDollar: settings.displayDollar,
-				inlineParen: settings.inlineParen,
-				displayBracket: settings.displayBracket
-			},
-			// Not a toggle, and not a stored key: see DEFAULT_SETTINGS above.
-			currencyGuard: true
-		};
-	}
-
-	function enabledDelimiterCount() {
-		return ["inlineDollar", "displayDollar", "inlineParen", "displayBracket"].filter(function (key) {
-			return settings[key];
-		}).length;
-	}
-
-	/* ------------------------------------------------------------------ *
 	 * Editor bridge
 	 * ------------------------------------------------------------------ */
-
-	// The seam (commands.js `run`) names its failures (`timeout`,
-	// `unparsable-command-result`, …); the report keeps the wording owners have
-	// read since the first builds - a dropped answer has always printed "no
-	// response from editor" here and it still does, it just has a name now.
-	function commandFailureText(result, noAnswerText) {
-		if (!result || result.error === "timeout") {
-			return noAnswerText;
-		}
-		return result.error;
-	}
 
 	function readDocument() {
 		return commands.run("read", {});
@@ -169,23 +100,11 @@
 	 * Reporting
 	 *
 	 * The record *shape* and its URL serialization are owned by
-	 * report-record.js (`make`/`encode`/`decode`/`textOf`); what stays here is
-	 * report *authoring* - the wording of a conversion and the bucketing of its
-	 * skips - which is conversion policy, not record layout.
+	 * report-record.js (`make`/`encode`/`decode`/`textOf`) and the report's
+	 * *wording* by report-text.js (a guard is not malformed - that policy lives
+	 * there, next to the words it chooses). What stays here is the report
+	 * *window* lifecycle: when one opens, and how it closes.
 	 * ------------------------------------------------------------------ */
-
-	function reportLine(report, text) {
-		report.lines.push(text);
-	}
-
-	function summarizeSkipped(skipped) {
-		var groups = {};
-		skipped.forEach(function (item) {
-			var reason = item.reason || "unknown";
-			groups[reason] = (groups[reason] || 0) + 1;
-		});
-		return groups;
-	}
 
 	// `force` is for the explicit *Show last report* request: silencing the report
 	// window must not make the report unreachable, only stop it appearing on its
@@ -251,7 +170,7 @@
 	function showLastReport() {
 		if (!lastReport) {
 			var empty = reportRecord.make(tr("Show last report"));
-			reportLine(empty, tr("No conversion has been run yet."));
+			reportText.reportLine(empty, tr("No conversion has been run yet."));
 			showReport(empty, true);
 			return;
 		}
@@ -260,6 +179,10 @@
 
 	/* ------------------------------------------------------------------ *
 	 * Conversion
+	 *
+	 * A pipeline: `read -> decide -> plan -> apply -> verify -> render`. The
+	 * stages only sequence; the policy is `decide` (pure) and the report's words
+	 * are report-text.js's - this section is the composition of the two.
 	 * ------------------------------------------------------------------ */
 
 	/**
@@ -270,185 +193,172 @@
 	 * `Ctrl+A` followed by this same action, which keeps one code path (and one
 	 * undo step) behind every conversion instead of two with different scopes.
 	 *
+	 * One stage at a time:
+	 *   read    the editor snapshot (`readDocument`)
+	 *   decide  policy: may this run at all? (`decide`, pure)
+	 *   plan    spans -> operations (locate.js), and the "nothing" refusal
+	 *   apply   the operations in the editor (commands.js `apply`)
+	 *   verify  re-read and prove the delimiters are gone
+	 *   render  the report (report-text.js) and its window
+	 *
 	 * Resolves with the report it produced, on every path - a refused conversion
 	 * is a report too, and callers (and the dev console) should not have to ask
 	 * the module whether it kept one.
 	 */
 	function convertSelection() {
-		var report = reportRecord.make(tr("Convert selection"));
-
-		if (enabledDelimiterCount() === 0) {
-			reportLine(report, tr("No delimiters are enabled. Turn one on in the plugin menu."));
-			showReport(report);
-			return Promise.resolve(report);
-		}
-
-		return readDocument()
-			.then(function (snapshot) {
-				if (!snapshot || snapshot.error) {
-					reportLine(
-						report,
-						tr("Cannot read the document") + ": " + commandFailureText(snapshot, "no response from editor")
-					);
-					showReport(report);
-					return report;
-				}
-
-				// The editor always reports a selection: an empty one where the
-				// caret happens to sit when nothing is highlighted. Only a real
-				// (non-collapsed) selection may scope the conversion - a collapsed
-				// caret is a no-op, never a whole-document surprise.
-				var selection = snapshot.selection;
-				if (!selection || selection.start === selection.end) {
-					reportLine(report, tr("Select the text to convert first."));
-					showReport(report);
-					return report;
-				}
-
-				// Plan only after the char -> position probe has answered; the
-				// big block below runs against the resolved plan.
-				return locate.plan(snapshot, scannerOptions(), selection, resolveSpanPositions).then(function (plan) {
-					return { snapshot: snapshot, selection: selection, plan: plan };
-				});
+		var run = {
+			report: reportRecord.make(tr("Convert selection")),
+			proceed: true,
+			refusal: null
+		};
+		return readStage(run)
+			.then(function () {
+				return decideStage(run);
 			})
-			.then(function (stage) {
-				if (!stage || !stage.plan) {
-					// An early exit from the checks above (unreadable document,
-					// collapsed selection): that value is already the final report.
-					return stage;
-				}
-				var selection = stage.selection;
-				var plan = stage.plan;
-				// locate.plan reports only what could not be read, and
-				// collectParagraphs counts every snapshot paragraph either
-				// readable or unusable - so the scanned count is the difference.
-				var scanned = ((stage.snapshot && stage.snapshot.paragraphs) || []).length - plan.unusable;
-
-				reportLine(
-					report,
-					tr("Scanned") +
-						": " +
-						scanned +
-						" " +
-						tr("paragraphs") +
-						", " +
-						plan.operations.length +
-						" " +
-						tr("LaTeX spans found") +
-						" (" +
-						plan.operations.filter(function (op) {
-							return op.display;
-						}).length +
-						" " +
-						tr("display") +
-						")"
-				);
-
-				if (plan.unusable > 0) {
-					reportLine(
-						report,
-						tr("Paragraphs that could not be read") + ": " + plan.unusable
-					);
-				}
-				if (plan.skipped.length > 0) {
-					reportLine(report, tr("Outside the selection") + ": " + plan.skipped.length);
-				}
-				if (plan.warnings.length > 0) {
-					// Two buckets, because they ask the author for different things.
-					// An unterminated delimiter is a typo to fix; a span a *guard*
-					// refused ("$5 and $6") is the guard working, and lumping the two
-					// together made a page of prices read as malformed LaTeX.
-					var malformed = {};
-					var guarded = {};
-					plan.warnings.forEach(function (warning) {
-						var bucket = warning.code.indexOf("guarded-") === 0 ? guarded : malformed;
-						bucket[warning.code] = (bucket[warning.code] || 0) + 1;
-					});
-					if (Object.keys(malformed).length > 0) {
-						reportLine(report, tr("Malformed delimiters") + ": " + JSON.stringify(malformed));
-					}
-					if (Object.keys(guarded).length > 0) {
-						reportLine(report, tr("Left as text by a guard") + ": " + JSON.stringify(guarded));
-					}
-				}
-
-				if (!plan.operations.length) {
-					reportLine(report, tr("Nothing to convert."));
-					showReport(report);
-					return report;
-				}
-
-				return commands.run("apply", {
-					operations: plan.operations,
-					createHistoryPoint: true
-				}).then(function (result) {
-					if (!result || result.error) {
-						reportLine(
-							report,
-							tr("Conversion failed") + ": " + commandFailureText(result, "no response from editor")
-						);
-						showReport(report);
-						return report;
-					}
-
-					var applied = result.applied || [];
-					report.converted = applied.length;
-					reportLine(report, tr("Converted") + ": " + applied.length + " / " + plan.operations.length);
-					reportLine(report, tr("Undo point created") + ": " + (result.historyPoint ? tr("yes") : tr("no")));
-
-					var displayCount = applied.filter(function (op) {
-						return op.display;
-					}).length;
-					if (displayCount > 0) {
-						reportLine(
-							report,
-							tr("Display math requested") +
-								": " +
-								displayCount +
-								", " +
-								tr("display mode applied via") +
-								": " +
-								(result.displayMode || tr("unavailable"))
-						);
-					}
-
-					var skippedGroups = summarizeSkipped(result.skipped || []);
-					Object.keys(skippedGroups).forEach(function (reason) {
-						reportLine(report, tr("Skipped") + " (" + reason + "): " + skippedGroups[reason]);
-					});
-					(result.skipped || []).slice(0, 5).forEach(function (item) {
-						reportLine(
-							report,
-							"  - " +
-								item.reason +
-								" @" +
-								item.start +
-								(item.expected ? " expected=" + JSON.stringify(item.expected) : "")
-						);
-					});
-
-					return verify(report, selection).then(function () {
-						showReport(report);
-						return report;
-					});
-				});
+			.then(function () {
+				return run.proceed ? planStage(run) : null;
+			})
+			.then(function () {
+				return run.proceed ? applyStage(run) : null;
+			})
+			.then(function () {
+				return run.proceed ? verifyStage(run) : null;
+			})
+			.then(function () {
+				return renderStage(run);
 			});
 	}
 
-	/** Re-read the document to prove the delimiters are gone. */
-	function verify(report, filter) {
+	/** Stage `read`: the snapshot the rest of the pipeline works against. */
+	function readStage(run) {
 		return readDocument().then(function (snapshot) {
-			if (!snapshot || snapshot.error) {
-				reportLine(report, tr("Verification unavailable") + ": " + commandFailureText(snapshot, "no response"));
-				return;
-			}
-			return locate.plan(snapshot, scannerOptions(), filter, resolveSpanPositions).then(function (plan) {
-				reportLine(report, tr("Delimiters still present") + ": " + plan.operations.length);
-				if (plan.operations.length === 0 && report.converted > 0) {
-					reportLine(report, tr("All converted spans became native math objects."));
+			run.snapshot = snapshot;
+		});
+	}
+
+	/**
+	 * Stage `decide`: the conversion's policy, and the only place that decides
+	 * whether the pipeline proceeds.
+	 *
+	 * Pure - a snapshot and the settings in, `{proceed, selection}` or
+	 * `{proceed: false, refusal}` out. No editor calls and no report wording
+	 * here: the refusals name their reason and report-text.js owns the words.
+	 * A failed read is decided like any other snapshot (`unreadable`), so the
+	 * outcome of a conversion never depends on how far a stage got.
+	 */
+	function decide(snapshot, settings) {
+		if (settingsModule.enabledDelimiterCount(settings) === 0) {
+			return { proceed: false, refusal: { reason: "no-delimiters" } };
+		}
+		if (!snapshot || snapshot.error) {
+			return { proceed: false, refusal: { reason: "unreadable", detail: snapshot } };
+		}
+		// The editor always reports a selection: an empty one where the
+		// caret happens to sit when nothing is highlighted. Only a real
+		// (non-collapsed) selection may scope the conversion - a collapsed
+		// caret is a no-op, never a whole-document surprise.
+		var selection = snapshot.selection;
+		if (!selection || selection.start === selection.end) {
+			return { proceed: false, refusal: { reason: "no-selection" } };
+		}
+		return { proceed: true, selection: selection };
+	}
+
+	function decideStage(run) {
+		var decision = decide(run.snapshot, settings);
+		if (decision.proceed) {
+			run.selection = decision.selection;
+			return;
+		}
+		run.proceed = false;
+		run.refusal = decision.refusal;
+	}
+
+	/**
+	 * Stage `plan`: spans -> operations against the resolved positions - or the
+	 * `nothing` refusal, which is plan's own outcome ("nothing to convert") and
+	 * reads after the plan's lines in the report.
+	 */
+	function planStage(run) {
+		return locate
+			.plan(run.snapshot, settingsModule.scannerOptions(settings), run.selection, resolveSpanPositions)
+			.then(function (plan) {
+				run.plan = plan;
+				// locate.plan reports only what could not be read, and the
+				// snapshot counts every paragraph either readable or unusable -
+				// so the scanned count is the difference.
+				run.scanned = ((run.snapshot && run.snapshot.paragraphs) || []).length - plan.unusable;
+				if (!plan.operations.length) {
+					run.proceed = false;
+					run.refusal = { reason: "nothing" };
 				}
 			});
+	}
+
+	/** Stage `apply`: the planned operations, one undo point behind them. */
+	function applyStage(run) {
+		return commands
+			.run("apply", {
+				operations: run.plan.operations,
+				createHistoryPoint: true
+			})
+			.then(function (result) {
+				run.applyResult = result;
+				if (!result || result.error) {
+					run.proceed = false;
+					return;
+				}
+				run.report.converted = (result.applied || []).length;
+			});
+	}
+
+	/**
+	 * Stage `verify`: re-read the document and prove the delimiters are gone -
+	 * scoped to the same selection the conversion used.
+	 */
+	function verifyStage(run) {
+		return readDocument().then(function (snapshot) {
+			if (!snapshot || snapshot.error) {
+				run.verifyResult = { failure: snapshot };
+				return;
+			}
+			return locate
+				.plan(snapshot, settingsModule.scannerOptions(settings), run.selection, resolveSpanPositions)
+				.then(function (plan) {
+					run.verifyResult = { remaining: plan.operations.length, converted: run.report.converted };
+				});
 		});
+	}
+
+	/**
+	 * Stage `render`: the report's words and its window. Every path lands here
+	 * and the order of the lines is the order of the stages - the `nothing`
+	 * refusal is the one line that follows its stage's own lines.
+	 */
+	function renderStage(run) {
+		var report = run.report;
+		if (run.plan) {
+			reportText.planLines(report, tr, run.plan, run.scanned);
+		}
+		if (run.refusal) {
+			reportText.reportLine(report, reportText.refusalLine(tr, run.refusal));
+		}
+		if (run.applyResult) {
+			if (run.applyResult.error) {
+				reportText.reportLine(report, reportText.applyFailureLine(tr, run.applyResult));
+			} else {
+				reportText.applyLines(report, tr, run.applyResult, run.plan.operations.length);
+			}
+		}
+		if (run.verifyResult) {
+			if (run.verifyResult.failure) {
+				reportText.reportLine(report, reportText.verifyFailureLine(tr, run.verifyResult.failure));
+			} else {
+				reportText.verifyLines(report, tr, run.verifyResult.remaining, run.verifyResult.converted);
+			}
+		}
+		showReport(report);
+		return report;
 	}
 
 	/* ------------------------------------------------------------------ *
@@ -509,7 +419,7 @@
 				delimiterLabel(toggle),
 				function () {
 					settings[toggle.key] = !settings[toggle.key];
-					saveSettings();
+					settingsModule.saveSettings(settings, window.localStorage);
 					updateMenuLabels();
 				},
 				toggle.icon,
@@ -524,7 +434,7 @@
 		// back, and the glyph says which state the item will switch to.
 		var reportToggle = addItem(reportToggleLabel(), function () {
 			settings.openReport = !settings.openReport;
-			saveSettings();
+			settingsModule.saveSettings(settings, window.localStorage);
 			updateMenuLabels();
 		});
 		reportToggle.updateLabel = function () {
@@ -609,200 +519,24 @@
 	/* ------------------------------------------------------------------ *
 	 * Hotkeys
 	 *
-	 * There is no plugin shortcut API in this build and the host's own key
-	 * event never reaches a plugin at document level (see `register`), so the
-	 * plugin listens to the editor's document itself. The plugin frame is a
-	 * child of the editor's main frame and both are `file://` origin, so
-	 * `window.parent.document` is reachable - measured live, plan section 2.2.
+	 * The rule set itself - the matcher, its binding/modifier tables, the chord
+	 * timing - is hotkeys.js (pure; its header carries the measurement that
+	 * shaped it). What stays here is the DOM lifecycle: there is no plugin
+	 * shortcut API in this build and the host's own key event never reaches a
+	 * plugin at document level (see `register`), so the plugin listens to the
+	 * editor's document itself. The plugin frame is a child of the editor's
+	 * main frame and both are `file://` origin, so `window.parent.document` is
+	 * reachable - measured live, plan section 2.2.
 	 * ------------------------------------------------------------------ */
-
-	// A chord does NOT arrive with its modifiers (measured).
-	//
-	// Measured with injected keystrokes against 9.4.0.130-1 on Linux/X11 (plan
-	// section 2.3, the only input path available when driving the app from a
-	// terminal): holding Alt and pressing L delivers *two* events - `Alt` (key
-	// "Alt", altKey true) and then `l` with keyCode 76, code "KeyL" and EVERY
-	// modifier flag false - and the editor inserts that `l` into the document as
-	// text. `Ctrl+Alt+M` behaves identically (both flags false, an `m` inserted).
-	// Whether a *physical* chord keeps its flags is untested; Chromium's
-	// access-key pass is the likely cause of the loss, and the matcher accepts
-	// both shapes so it does not matter.
-	//
-	// Consequences, and why this matcher is shaped the way it is:
-	//   - a chord is recognised from the MODIFIER key presses that precede the
-	//     bound key as well as from the bound key's own flags;
-	//   - the modifier set must match the binding EXACTLY, which is what keeps a
-	//     plain `l` and an ordinary `Ctrl+L` out of the branch;
-	//   - a claimed key must be swallowed, or it lands in the document.
-	//
-	// Do not "simplify" this back to a `keyCode === 76` or `event.altKey` test.
-	var HOTKEYS = [
-		{ code: "KeyL", key: "l", mods: ["Alt"] }
-	];
-	// A modifier keyup the plugin never saw must not leave a chord armed forever.
-	// A real chord is pressed within this window of its modifier.
-	var CHORD_MODIFIER_WINDOW_MS = 1500;
-	var MODIFIER_KEYS = { Control: "Control", Alt: "Alt", Shift: "Shift", Meta: "Meta" };
-	var MODIFIER_CODES = {
-		ControlLeft: "Control",
-		ControlRight: "Control",
-		AltLeft: "Alt",
-		AltRight: "Alt",
-		ShiftLeft: "Shift",
-		ShiftRight: "Shift",
-		MetaLeft: "Meta",
-		MetaRight: "Meta"
-	};
-
-	function modifierName(event) {
-		if (event.key && MODIFIER_KEYS[event.key]) {
-			return MODIFIER_KEYS[event.key];
-		}
-		if (event.code && MODIFIER_CODES[event.code]) {
-			return MODIFIER_CODES[event.code];
-		}
-		return null;
-	}
-
-	function sameModifierSet(a, b) {
-		if (!a || !b || a.length !== b.length) {
-			return false;
-		}
-		return a.every(function (name) {
-			return b.indexOf(name) >= 0;
-		});
-	}
-
-	function altGraphHeld(event) {
-		try {
-			return typeof event.getModifierState === "function" && !!event.getModifierState("AltGraph");
-		} catch (e) {
-			return false;
-		}
-	}
-
-	/**
-	 * Turns the raw key stream into the binding it completes, or `null` when the
-	 * key is not ours.
-	 *
-	 * Everything it knows comes from the events handed to it plus the `now` the
-	 * caller passes, so the whole rule set - including the timing - is testable
-	 * without a browser.
-	 */
-	function createHotkeyMatcher(bindings) {
-		var pressed = {};
-		var lastModifierAt = null;
-
-		function armedSet(now) {
-			if (lastModifierAt === null || now - lastModifierAt > CHORD_MODIFIER_WINDOW_MS) {
-				// Nothing armed: a missed modifier keyup must not poison a later
-				// keystroke.
-				return null;
-			}
-			return Object.keys(pressed);
-		}
-
-		// When the host does report modifiers (a browser build, or one that does
-		// not consume them) the reported flags win; otherwise the modifier keys
-		// that were seen do.
-		function reportedSet(event) {
-			var set = [];
-			if (event.ctrlKey) {
-				set.push("Control");
-			}
-			if (event.altKey) {
-				set.push("Alt");
-			}
-			if (event.shiftKey) {
-				set.push("Shift");
-			}
-			if (event.metaKey) {
-				set.push("Meta");
-			}
-			return set.length ? set : null;
-		}
-
-		function match(event, mods) {
-			var code = event.code || "";
-			var key = typeof event.key === "string" ? event.key.toLowerCase() : "";
-			for (var i = 0; i < bindings.length; i++) {
-				var binding = bindings[i];
-				if (code !== binding.code && key !== binding.key) {
-					continue;
-				}
-				if (sameModifierSet(mods, binding.mods)) {
-					return binding;
-				}
-			}
-			return null;
-		}
-
-		return {
-			keydown: function (event, now) {
-				if (!event) {
-					return null;
-				}
-				var name = modifierName(event);
-				if (name) {
-					// Recorded, never claimed: Alt on its own keeps its normal
-					// behaviour (it is also how a chord is announced).
-					pressed[name] = true;
-					lastModifierAt = now;
-					return null;
-				}
-				var mods = reportedSet(event);
-				if (!mods) {
-					mods = armedSet(now) || [];
-				}
-				var matched = null;
-				if (!event.repeat && !altGraphHeld(event)) {
-					// Auto-repeat must not convert over and over; `AltGr` shows up
-					// as Control+Alt on layouts that type with it.
-					matched = match(event, mods);
-				}
-				// Any other key consumes the chord state: a chord belongs to the
-				// key that completed it.
-				pressed = {};
-				lastModifierAt = null;
-				return matched;
-			},
-			keyup: function (event) {
-				var name = event ? modifierName(event) : null;
-				if (!name) {
-					return;
-				}
-				delete pressed[name];
-				if (Object.keys(pressed).length === 0) {
-					lastModifierAt = null;
-				}
-			},
-			// Inspection helpers: `reset` lets a test (or the dev console) start
-			// from a clean state, `armed` reports the modifiers currently held.
-			reset: function () {
-				pressed = {};
-				lastModifierAt = null;
-			},
-			armed: function (now) {
-				return armedSet(now) || [];
-			}
-		};
-	}
 
 	var hotkeyStatus = {
 		attached: 0,
 		blocked: 0,
-		chords: HOTKEYS.map(function (binding) {
+		chords: hotkeys.HOTKEYS.map(function (binding) {
 			return binding.mods.join("+") + "+" + binding.key.toUpperCase();
 		})
 	};
 	var hotkeyMarker = "onlyOfficeLatexMathHotkey" + (window.Asc.plugin.guid || "");
-
-	function nowMs() {
-		if (window.Date && typeof window.Date.now === "function") {
-			return window.Date.now();
-		}
-		return new Date().getTime();
-	}
 
 	function attachToDocument(doc, matcher) {
 		if (doc[hotkeyMarker]) {
@@ -811,7 +545,7 @@
 		function onKeyDown(event) {
 			var binding = null;
 			try {
-				binding = matcher.keydown(event, nowMs());
+				binding = matcher.keydown(event, hotkeys.nowMs());
 			} catch (e) {
 				console.error("[latex-math] hotkey matcher failed", e);
 				return;
@@ -853,7 +587,7 @@
 	 * make the attach fail, never break the rest of the plugin.
 	 */
 	function attachHotkeys() {
-		var matcher = createHotkeyMatcher(HOTKEYS);
+		var matcher = hotkeys.createHotkeyMatcher(hotkeys.HOTKEYS);
 		var frame = null;
 		try {
 			frame = window.parent;
@@ -990,7 +724,7 @@
 	}
 
 	window.Asc.plugin.init = function () {
-		settings = loadSettings();
+		settings = settingsModule.loadSettings(window.localStorage);
 		register();
 		markEditorReady("init");
 		probeEditor();
@@ -1009,7 +743,7 @@
 	// backstop - which is what the backstop is for.
 	window.Asc.plugin.onThemeChanged = function (theme) {
 		if (!prepared) {
-			settings = loadSettings();
+			settings = settingsModule.loadSettings(window.localStorage);
 			register();
 			markEditorReady("theme");
 		}
@@ -1043,15 +777,18 @@
 	// Exposed for manual testing from the plugin dev console.
 	window.OnlyOfficeLatexMathApi = {
 		convertSelection: convertSelection,
+		// The pipeline's policy, pure and exposed on its own:
+		// `decide(snapshot, settings)` -> `{proceed, selection}` or a refusal.
+		decide: decide,
 		readDocument: readDocument,
 		showLastReport: showLastReport,
 		closeReportWindow: closeReportWindow,
 		// Re-running the attach is harmless (the document marker makes it
 		// idempotent) and is how the hotkeys can be inspected from the console.
 		attachHotkeys: attachHotkeys,
-		createHotkeyMatcher: createHotkeyMatcher,
+		createHotkeyMatcher: hotkeys.createHotkeyMatcher,
 		getHotkeys: function () {
-			return HOTKEYS;
+			return hotkeys.HOTKEYS;
 		},
 		getHotkeyStatus: function () {
 			return { attached: hotkeyStatus.attached, blocked: hotkeyStatus.blocked, chords: hotkeyStatus.chords.slice() };
